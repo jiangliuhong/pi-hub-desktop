@@ -1,0 +1,10 @@
+node_modules
+dist
+dist-ssr
+coverage
+src-tauri/target
+src-tauri/gen
+docs
+package-lock.json
+Cargo.lock
+CHANGELOG.md

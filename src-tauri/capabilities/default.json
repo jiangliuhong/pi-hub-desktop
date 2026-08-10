@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capability for the trusted main App Shell window only. The remote Pi Hub Service WebView must never match a capability (AGENTS.md §6.4).",
+  "windows": ["main"],
+  "permissions": ["core:default", "opener:default"]
+}

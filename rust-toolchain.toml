@@ -1,0 +1,9 @@
+# Pin the Rust toolchain for reproducible builds across contributors and CI.
+#
+# Apple targets used by V1 (`aarch64-apple-darwin`, `aarch64-apple-ios`,
+# `aarch64-apple-ios-sim`, `x86_64-apple-darwin`) are installed on a macOS
+# host via `rustup target add ...` or when running `npm run tauri ios init`.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

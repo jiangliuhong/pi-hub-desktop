@@ -1,0 +1,27 @@
+[package]
+name = "pi-hub-desktop"
+version = "0.1.0"
+description = "Pi Hub Client — macOS / iOS client for Pi Hub"
+authors = ["jiangliuhong"]
+edition = "2021"
+
+# Dependencies are added deliberately per V1 phase. The set below is the
+# minimum needed for the initialization skeleton to compile and run. SSH
+# (`russh`), Keychain (`security-framework`), the store plugin and the data
+# model crates (`tokio`, `uuid`, `chrono`, `url`, `async-trait`, `thiserror`,
+# `tracing`) are introduced together with the code that actually uses them,
+# per AGENTS.md §3 (justify every new dependency).
+
+[lib]
+# The `_lib` suffix avoids a name clash between the lib and bin crate on Windows.
+name = "pi_hub_client_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
