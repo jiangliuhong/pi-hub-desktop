@@ -76,6 +76,13 @@ semver = "1"
 # business layer. Minimal, ubiquitous crate; no unsafe spread.
 libc = "0.2"
 
+# --- Apple Keychain (§6.1 credential security) ---
+# Justification: credentials must be stored in Apple Security Framework on
+# macOS and iOS; std and the existing dependencies do not expose Keychain APIs.
+# Scoped to Darwin targets so non-Apple test builds remain portable.
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+security-framework = "3.7"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util", "rt-multi-thread", "macros"] }
 tempfile = "3"

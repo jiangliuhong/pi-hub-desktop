@@ -32,7 +32,8 @@ use crate::local_runtime::settings::LocalRuntimeSettingsStore;
 use crate::profile::repository::ProfileStore;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tauri::Manager;
+use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
+use tauri::{Emitter, Manager};
 
 /// Product display name shared with the frontend / about surface.
 pub const APP_NAME: &str = "Pi Hub Client";
@@ -143,6 +144,31 @@ pub fn run() {
         .manage(state.credentials)
         .manage(state.manager)
         .setup(move |app| {
+            // The macOS menu bar remains available while the Pi Hub viewer
+            // occupies the entire window. The frontend handles navigation so
+            // the remote page never receives native menu capabilities.
+            let settings = MenuItemBuilder::with_id("open-settings", "设置…")
+                .accelerator("CmdOrCtrl+,")
+                .build(app)?;
+            let return_to_services =
+                MenuItemBuilder::with_id("return-to-services", "返回服务列表").build(app)?;
+            let app_menu = SubmenuBuilder::new(app, "Pi Hub Client")
+                .item(&settings)
+                .separator()
+                .item(&return_to_services)
+                .build()?;
+            let menu = MenuBuilder::new(app).item(&app_menu).build()?;
+            app.set_menu(menu)?;
+            app.on_menu_event(|app, event| match event.id().as_ref() {
+                "open-settings" => {
+                    let _ = app.emit("app://open-settings", ());
+                }
+                "return-to-services" => {
+                    let _ = app.emit("app://return-to-services", ());
+                }
+                _ => {}
+            });
+
             // Build the V2 local runtime manager with a Tauri-backed
             // broadcaster (design-v2 §16, §17.2). Construction in `setup`
             // gives us the AppHandle needed for event emission.
@@ -152,8 +178,7 @@ pub fn run() {
             ));
             // Load settings best-effort (defaults are usable on failure).
             let local_settings_load = local_settings.clone();
-            let runtime = tokio::runtime::Handle::current();
-            runtime.block_on(async move {
+            tauri::async_runtime::block_on(async move {
                 let _ = local_settings_load.load().await;
             });
             let credentials = credential_store.clone();
@@ -164,7 +189,10 @@ pub fn run() {
             ));
             app.manage(manager.clone());
             // Async app-launch init: scan + optional auto-start (design-v2 §14.1).
-            manager.spawn_initialize();
+            let init_manager = manager.clone();
+            tauri::async_runtime::spawn(async move {
+                init_manager.initialize().await;
+            });
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -175,7 +203,7 @@ pub fn run() {
             if let tauri::WindowEvent::Focused(true) = event {
                 if let Some(manager) = window.app_handle().try_state::<Arc<LocalRuntimeManager>>() {
                     let manager = manager.inner().clone();
-                    tokio::spawn(async move {
+                    tauri::async_runtime::spawn(async move {
                         let _ = manager.refresh().await;
                     });
                 }

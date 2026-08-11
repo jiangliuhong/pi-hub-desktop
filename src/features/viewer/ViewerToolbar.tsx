@@ -1,24 +1,28 @@
-import { useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { closeServiceView, openServiceView } from "./api";
-import { disconnectService, getConnectionStatus } from "../connection/api";
-import { connectionStateLabel } from "../connection/model";
+import {
+  createHostExtensionRegistration,
+  parsePiHubHostExtensionEvent,
+} from "./bridge";
+import { getConnectionStatus } from "../connection/api";
 import { PagePlaceholder } from "../../components/PagePlaceholder";
 import type { AppErrorDto } from "../../lib/tauri";
 
 /**
- * Trusted toolbar over the untrusted Service View
+ * Full-window Service View for the existing Pi Hub WebUI
  * (docs/requirements-v1.md §8.5, FR-012).
  *
- * Provides return-to-list, status, refresh and disconnect controls. These
- * controls are App Shell UI only — the remote Pi Hub page cannot reach them
- * (AGENTS.md §6.4). The actual Service WebView window is opened via the Rust
- * viewer commands and remains capability-isolated.
+ * Pi Hub may render host-declared controls in its native extension slots after
+ * receiving the versioned postMessage registration documented in
+ * docs/pi-hub-embed-contract-v1.md. The remote page still receives no Tauri
+ * capability (AGENTS.md §6.4).
  */
 export function ViewerToolbar() {
   const { id } = useParams<{ id: string }>();
-  const [status, setStatus] = useState<string>("idle");
-  const [allowedOrigin, setAllowedOrigin] = useState<string | null>(null);
+  const navigate = useNavigate();
+  const frameRef = useRef<HTMLIFrameElement>(null);
+  const [effectiveUrl, setEffectiveUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -29,10 +33,9 @@ export function ViewerToolbar() {
         const s = await getConnectionStatus(id);
         if (cancelled) return;
         if (s?.effective_url) {
-          setStatus(s.state);
-          const resp = await openServiceView(id, s.effective_url);
+          await openServiceView(id, s.effective_url);
           if (cancelled) return;
-          setAllowedOrigin(resp.allowed_origin);
+          setEffectiveUrl(s.effective_url);
         } else {
           setError("当前没有活动连接，请返回列表重新连接。");
         }
@@ -47,16 +50,39 @@ export function ViewerToolbar() {
     };
   }, [id]);
 
-  const disconnect = async () => {
-    if (!id) return;
-    try {
-      await disconnectService(id);
-      await closeServiceView(id);
-      setStatus("disconnected");
-    } catch (e) {
-      const dto = e as AppErrorDto | undefined;
-      setError(dto?.message ?? "断开失败。");
+  const returnToList = useCallback(async () => {
+    if (id) {
+      try {
+        await closeServiceView(id);
+      } catch {
+        // Navigation must remain available even if cleanup already happened.
+      }
     }
+    void navigate("/");
+  }, [id, navigate]);
+
+  useEffect(() => {
+    if (!effectiveUrl) return;
+    const allowedOrigin = new URL(effectiveUrl).origin;
+    const receiveHostAction = (event: MessageEvent<unknown>) => {
+      if (event.source !== frameRef.current?.contentWindow) return;
+      if (event.origin !== allowedOrigin) return;
+      const extensionEvent = parsePiHubHostExtensionEvent(event.data);
+      if (extensionEvent?.itemId === "return_to_services") {
+        void returnToList();
+      }
+    };
+    window.addEventListener("message", receiveHostAction);
+    return () => window.removeEventListener("message", receiveHostAction);
+  }, [effectiveUrl, returnToList]);
+
+  const registerHostExtensions = () => {
+    if (!effectiveUrl) return;
+    const allowedOrigin = new URL(effectiveUrl).origin;
+    frameRef.current?.contentWindow?.postMessage(
+      createHostExtensionRegistration(),
+      allowedOrigin,
+    );
   };
 
   if (error) {
@@ -69,32 +95,21 @@ export function ViewerToolbar() {
   }
 
   return (
-    <div className="viewer-toolbar">
-      <div className="viewer-controls">
-        <Link to="/">← 返回列表</Link>
-        <span className="state-label">
-          连接状态：{connectionStateLabel(status as never)}
-        </span>
-        {allowedOrigin ? (
-          <span className="allowed-origin" title="允许的 origin">
-            {allowedOrigin}
-          </span>
-        ) : null}
-        <button type="button" onClick={() => window.location.reload()}>
-          刷新
-        </button>
-        <button
-          type="button"
-          className="danger"
-          onClick={() => void disconnect()}
-        >
-          断开 / 重连
-        </button>
-      </div>
-      <p className="hint">
-        Service WebView 加载的是远端内容，按不可信处理，不具备任何 Tauri
-        原生权限 （AGENTS.md §6.4）。
-      </p>
+    <div className="viewer-page">
+      {effectiveUrl ? (
+        <iframe
+          ref={frameRef}
+          className="service-view-frame"
+          src={effectiveUrl}
+          title="Pi Hub"
+          referrerPolicy="no-referrer"
+          // Clipboard access is required for user-initiated paste in the
+          // cross-origin Service View. This does not grant the frame any
+          // Tauri capability or access to the trusted App Shell.
+          allow="clipboard-read; clipboard-write"
+          onLoad={registerHostExtensions}
+        />
+      ) : null}
     </div>
   );
 }

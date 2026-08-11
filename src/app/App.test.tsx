@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import { App } from "./App";
 
 /**
@@ -31,10 +31,22 @@ describe("App", () => {
     });
   });
 
-  it("renders the trusted app shell header over the home route", async () => {
+  it("renders the home route without duplicating the native app title bar", async () => {
     render(<App />);
-    expect(screen.getByText("Pi Hub Client")).toBeInTheDocument();
     expect(await screen.findByText(/还没有 Pi Hub 服务/)).toBeInTheDocument();
+    expect(screen.queryByText("Pi Hub Client")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("打开设置")).not.toBeInTheDocument();
+  });
+
+  it("opens settings as a global dialog", async () => {
+    render(<App />);
+    await act(() => {
+      window.dispatchEvent(new Event("app:open-settings"));
+      return Promise.resolve();
+    });
+    expect(
+      await screen.findByRole("dialog", { name: "设置" }),
+    ).toBeInTheDocument();
   });
 
   it("exposes the add-service entry point from the empty state", async () => {

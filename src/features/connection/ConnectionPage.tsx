@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useParams, Link } from "react-router-dom";
+import { useNavigate, useParams, Link } from "react-router-dom";
 import {
   connectService,
   getConnectionStatus,
@@ -9,7 +9,6 @@ import {
 } from "./api";
 import { connectionStateLabel } from "./model";
 import { HostKeyDialog } from "./HostKeyDialog";
-import { PagePlaceholder } from "../../components/PagePlaceholder";
 import type { AppErrorDto } from "../../lib/tauri";
 import type { ConnectionDiagnostics } from "../../types";
 
@@ -23,6 +22,7 @@ import type { ConnectionDiagnostics } from "../../types";
  */
 export function ConnectionPage() {
   const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
   const [state, setState] = useState<string>("idle");
   const [error, setError] = useState<string | null>(null);
   const [diagnostics, setDiagnostics] = useState<ConnectionDiagnostics | null>(
@@ -62,7 +62,9 @@ export function ConnectionPage() {
     }
     setState("connected");
     setPhase("done");
-    // The Service View opens in the toolbar surface; here we just confirm.
+    if (id) {
+      void navigate(`/viewer/${id}`, { replace: true });
+    }
   };
 
   const fail = (e: unknown) => {
@@ -138,16 +140,6 @@ export function ConnectionPage() {
           challenge={challenge}
           onRespond={(a) => void respondChallenge(a)}
         />
-      ) : null}
-
-      {state === "connected" && !error ? (
-        <PagePlaceholder title="已连接">
-          <p>Pi Hub 服务已就绪。</p>
-          <div className="row-gap">
-            <Link to={`/viewer/${id ?? ""}`}>打开 Pi Hub</Link>
-            <Link to="/">返回列表</Link>
-          </div>
-        </PagePlaceholder>
       ) : null}
     </div>
   );

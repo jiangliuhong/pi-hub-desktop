@@ -66,61 +66,55 @@ export function ServiceListPage() {
     );
   }
 
-  if (services.length === 0) {
-    return (
-      <PagePlaceholder title="还没有 Pi Hub 服务">
-        <p>添加你的第一个 Pi Hub 服务以开始使用。</p>
-        <Link className="add-button" to="/services/new">
-          + 添加服务
-        </Link>
-      </PagePlaceholder>
-    );
-  }
-
   return (
-    <div>
+    <div className="home-page">
       {localRuntimeSupported ? <LocalRuntimeCard /> : null}
       {error ? (
         <div role="alert" className="error-banner">
           {error}
         </div>
       ) : null}
-      <ul className="service-list" aria-label="服务列表">
-        {services.map((service) => (
-          <li key={service.metadata.id}>
-            <Link
-              to={`/connect/${service.metadata.id}`}
-              className="service-row"
-            >
-              <span className="name">{service.metadata.name}</span>
-              <span className="meta">
-                {service.connection_type === "direct_url"
-                  ? "Direct URL"
-                  : "SSH Forward"}{" "}
-                · {connectionStateLabel("idle")}
-              </span>
-            </Link>
-            <div className="service-actions">
-              <button
-                type="button"
-                onClick={() => {
-                  void navigate(`/connect/${service.metadata.id}`);
-                }}
+      {services.length === 0 ? (
+        <span className="sr-only">还没有 Pi Hub 服务</span>
+      ) : null}
+      {services.length > 0 ? (
+        <ul className="service-list" aria-label="服务列表">
+          {services.map((service) => (
+            <li key={service.metadata.id}>
+              <Link
+                to={`/connect/${service.metadata.id}`}
+                className="service-row"
               >
-                连接
-              </button>
-              <Link to={`/services/${service.metadata.id}/edit`}>编辑</Link>
-              <button
-                type="button"
-                className="danger"
-                onClick={() => setPendingDelete(service)}
-              >
-                删除
-              </button>
-            </div>
-          </li>
-        ))}
-      </ul>
+                <span className="name">{service.metadata.name}</span>
+                <span className="meta">
+                  {service.connection_type === "direct_url"
+                    ? "Direct URL"
+                    : "SSH Forward"}{" "}
+                  · {connectionStateLabel("idle")}
+                </span>
+              </Link>
+              <div className="service-actions">
+                <button
+                  type="button"
+                  onClick={() => {
+                    void navigate(`/connect/${service.metadata.id}`);
+                  }}
+                >
+                  连接
+                </button>
+                <Link to={`/services/${service.metadata.id}/edit`}>编辑</Link>
+                <button
+                  type="button"
+                  className="danger"
+                  onClick={() => setPendingDelete(service)}
+                >
+                  删除
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      ) : null}
       <Link className="add-button" to="/services/new">
         + 添加服务
       </Link>

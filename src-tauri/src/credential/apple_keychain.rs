@@ -15,7 +15,9 @@ use crate::credential::{
 };
 use crate::APP_BUNDLE_ID;
 use async_trait::async_trait;
-use security_framework::password::AsyncGenericPassword;
+use security_framework::passwords::{
+    delete_generic_password, get_generic_password, set_generic_password,
+};
 
 /// Keychain-backed store. All items share the fixed `service` (bundle id);
 /// `account` disambiguates credential id + kind.
@@ -42,9 +44,11 @@ impl CredentialStore for AppleKeychainStore {
         let account = Self::account(id, kind);
         // `set_generic_password` overwrites an existing item with the same
         // service+account, which is the desired update semantics.
-        AsyncGenericPassword::set_service_password(APP_BUNDLE_ID, &account, value.into_secret())
-            .await
-            .map_err(|e| CredentialError::Backend(e.to_string()))
+        let mut bytes = value.into_secret();
+        let result = set_generic_password(APP_BUNDLE_ID, &account, &bytes)
+            .map_err(|e| CredentialError::Backend(e.to_string()));
+        bytes.fill(0);
+        result
     }
 
     async fn get(
@@ -53,19 +57,17 @@ impl CredentialStore for AppleKeychainStore {
         kind: CredentialKind,
     ) -> Result<SecretValue, CredentialError> {
         let account = Self::account(id, kind);
-        let bytes = AsyncGenericPassword::get_service_password(APP_BUNDLE_ID, &account)
-            .await
-            .map_err(|e| match e.code() {
-                // `errSecItemNotFound` surfaces as NotFound.
-                -25300 => CredentialError::NotFound,
-                _ => CredentialError::Backend(e.to_string()),
-            })?;
+        let bytes = get_generic_password(APP_BUNDLE_ID, &account).map_err(|e| match e.code() {
+            // `errSecItemNotFound` surfaces as NotFound.
+            -25300 => CredentialError::NotFound,
+            _ => CredentialError::Backend(e.to_string()),
+        })?;
         Ok(SecretValue::new(kind, bytes))
     }
 
     async fn delete(&self, id: &CredentialId, kind: CredentialKind) -> Result<(), CredentialError> {
         let account = Self::account(id, kind);
-        match AsyncGenericPassword::delete_service_password(APP_BUNDLE_ID, &account).await {
+        match delete_generic_password(APP_BUNDLE_ID, &account) {
             Ok(()) => Ok(()),
             // Missing item is not an error (idempotent delete).
             Err(e) if e.code() == -25300 => Ok(()),

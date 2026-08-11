@@ -1194,3 +1194,11 @@ V1 完成后可按优先级增加：
 | 公网 Direct HTTP | 不支持，要求 HTTPS |
 | iOS 后台 Tunnel | 不承诺；回前台自动恢复 |
 | Cookie 隔离 | 每 service 独立 WebView data store |
+
+---
+
+## 28. Pi Hub 内嵌 Client 菜单协议
+
+Desktop 不向远端 Pi Hub DOM 注入按钮。Desktop 通过版本化、严格来源校验的 `postMessage` 协议注册声明式按钮和菜单；Pi Hub 只提供固定插槽、白名单控件与原生渲染，并把交互事件返回 Desktop。Desktop 维护声明和动作处理，Pi Hub 维护布局、主题、响应式与无障碍；Service WebView 继续保持零 Tauri Capability。
+
+协议、声明模型、Pi Hub 配合事项、安全边界和验收步骤见 [`pi-hub-embed-contract-v1.md`](./pi-hub-embed-contract-v1.md)。

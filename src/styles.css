@@ -1,15 +1,28 @@
 :root {
+  --bg: #f5f7fb;
+  --panel: #ffffff;
+  --text: #172033;
+  --muted: #667085;
+  --accent: #2864d7;
+  --border: #d9e0eb;
+  --danger: #dc4c4c;
+  --danger-border: #e4a2a2;
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial,
+    sans-serif;
+  color: var(--text);
+  background-color: var(--bg);
+}
+
+:root[data-theme="dark"] {
   --bg: #0f1115;
   --panel: #171a21;
   --text: #e6e8ec;
   --muted: #9aa3b2;
   --accent: #4f8cff;
   --border: #262b36;
-  font-family:
-    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial,
-    sans-serif;
-  color: var(--text);
-  background-color: var(--bg);
+  --danger: #ff7b7b;
+  --danger-border: #743535;
 }
 
 * {
@@ -37,12 +50,25 @@ a {
   min-height: 100%;
 }
 
+.app-shell.viewer-shell {
+  height: 100%;
+  min-height: 0;
+}
+
 .app-header {
   display: flex;
   align-items: center;
   gap: 0.75rem;
+  width: 100%;
   padding: 0.85rem 1.25rem;
   border-bottom: 1px solid var(--border);
+}
+
+.header-settings {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 0.85rem;
+  text-decoration: none;
 }
 
 .app-header h1 {
@@ -58,7 +84,15 @@ a {
 
 .app-main {
   flex: 1;
-  padding: 1.5rem 1.25rem;
+  min-height: 0;
+  padding: 2rem 2.5rem;
+}
+
+.app-main.viewer-main {
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  overflow: hidden;
 }
 
 .placeholder {
@@ -83,13 +117,14 @@ a {
 }
 
 .service-list {
+  width: 100%;
+  max-width: none;
   list-style: none;
   margin: 0;
   padding: 0;
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
-  max-width: 640px;
 }
 
 .service-list li {
@@ -156,8 +191,8 @@ a {
 .service-actions .danger,
 .modal-actions .danger,
 button.danger {
-  color: #ff6b6b;
-  border-color: #5a2a2a;
+  color: var(--danger);
+  border-color: var(--danger-border);
 }
 
 button.primary {
@@ -358,6 +393,23 @@ fieldset.field label {
   color: var(--muted);
 }
 
+.viewer-page {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  background: #fff;
+}
+
+.service-view-frame {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #fff;
+}
+
 .viewer-toolbar {
   display: flex;
   flex-direction: column;
@@ -383,6 +435,161 @@ fieldset.field label {
 .allowed-origin {
   font-size: 0.75rem;
   color: var(--muted);
+}
+
+/* ===== Homepage layout ===== */
+.home-page {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  width: 100%;
+}
+
+.home-page > .local-runtime-card,
+.home-page > .service-list {
+  width: 100%;
+}
+
+.local-runtime-card {
+  margin-bottom: 0;
+}
+
+.service-list {
+  gap: 1.25rem;
+}
+
+/* ===== Settings dialog ===== */
+.settings-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  background: rgba(15, 23, 42, 0.32);
+  backdrop-filter: blur(2px);
+}
+
+.settings-dialog {
+  width: min(100%, 540px);
+  max-height: calc(100vh - 2rem);
+  overflow: auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 20px 48px rgba(15, 23, 42, 0.2);
+}
+
+.settings-dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-dialog-header h2 {
+  margin: 0;
+  font-size: 1.2rem;
+}
+
+.settings-dialog-header button {
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 1.4rem;
+  cursor: pointer;
+}
+
+.settings-dialog-header button:hover {
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+  color: var(--text);
+}
+
+.settings-card {
+  padding: 1.25rem;
+  background: var(--panel);
+}
+
+.settings-card h3 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.settings-description {
+  margin: 0.35rem 0 1rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.theme-options {
+  display: grid;
+  gap: 0.6rem;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.theme-option {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  min-height: 3.75rem;
+  padding: 0.75rem 0.9rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  cursor: pointer;
+  transition:
+    border-color 120ms ease,
+    background-color 120ms ease;
+}
+
+.theme-option:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+
+.theme-option:has(input:checked) {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 7%, var(--panel));
+}
+
+.theme-option input {
+  width: 1rem;
+  height: 1rem;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.theme-option span {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.theme-option strong {
+  font-size: 0.9rem;
+}
+
+.theme-option small {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 /* ===== V2 local runtime (docs/design-v2.md) ===== */
@@ -423,8 +630,9 @@ fieldset.field label {
 
 .badge-failed,
 .badge-port_conflict {
-  color: #ff8b8b;
-  border-color: #6b2e2e;
+  color: var(--danger);
+  border-color: var(--danger-border);
+  background: color-mix(in srgb, var(--danger) 5%, transparent);
 }
 
 .local-runtime-meta {
@@ -597,6 +805,12 @@ fieldset.field label {
   grid-column: 1 / -1;
   color: var(--muted);
   font-size: 0.8rem;
+}
+
+@media (max-width: 700px) {
+  .app-main {
+    padding: 1.25rem 1rem;
+  }
 }
 
 .logs-view {
