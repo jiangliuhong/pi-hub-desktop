@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { closeServiceView, openServiceView } from "./api";
 import {
   createHostExtensionRegistration,
+  OPEN_SETTINGS_ITEM_ID,
   parsePiHubHostExtensionEvent,
 } from "./bridge";
 import { getConnectionStatus } from "../connection/api";
@@ -22,6 +23,7 @@ export function ViewerToolbar() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const frameRef = useRef<HTMLIFrameElement>(null);
+  const registrationTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
   const [effectiveUrl, setEffectiveUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -68,21 +70,38 @@ export function ViewerToolbar() {
       if (event.source !== frameRef.current?.contentWindow) return;
       if (event.origin !== allowedOrigin) return;
       const extensionEvent = parsePiHubHostExtensionEvent(event.data);
-      if (extensionEvent?.itemId === "return_to_services") {
+      if (extensionEvent?.itemId === OPEN_SETTINGS_ITEM_ID) {
+        window.dispatchEvent(new Event("app:open-settings"));
+      } else if (extensionEvent?.itemId === "return_to_services") {
         void returnToList();
       }
     };
     window.addEventListener("message", receiveHostAction);
-    return () => window.removeEventListener("message", receiveHostAction);
+    return () => {
+      window.removeEventListener("message", receiveHostAction);
+      for (const timer of registrationTimersRef.current) clearTimeout(timer);
+      registrationTimersRef.current = [];
+    };
   }, [effectiveUrl, returnToList]);
 
   const registerHostExtensions = () => {
     if (!effectiveUrl) return;
     const allowedOrigin = new URL(effectiveUrl).origin;
-    frameRef.current?.contentWindow?.postMessage(
-      createHostExtensionRegistration(),
-      allowedOrigin,
-    );
+    const registration = createHostExtensionRegistration();
+    const send = () => {
+      frameRef.current?.contentWindow?.postMessage(registration, allowedOrigin);
+    };
+
+    // The iframe's load event can race React hydration in the remote Hub. A
+    // single postMessage may arrive before useHostExtensions subscribes, so
+    // retry briefly after load. Registrations are idempotent by extension id
+    // and revision, and all timers are cleared when the viewer unmounts.
+    for (const timer of registrationTimersRef.current) clearTimeout(timer);
+    registrationTimersRef.current = [];
+    send();
+    for (const delay of [50, 250, 1000]) {
+      registrationTimersRef.current.push(setTimeout(send, delay));
+    }
   };
 
   if (error) {
@@ -106,7 +125,7 @@ export function ViewerToolbar() {
           // Clipboard access is required for user-initiated paste in the
           // cross-origin Service View. This does not grant the frame any
           // Tauri capability or access to the trusted App Shell.
-          allow="clipboard-read; clipboard-write"
+          allow={`clipboard-read ${new URL(effectiveUrl).origin}; clipboard-write ${new URL(effectiveUrl).origin}`}
           onLoad={registerHostExtensions}
         />
       ) : null}

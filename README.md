@@ -197,6 +197,20 @@ npm run tauri build
 npm run tauri ios build
 ```
 
+## macOS Release
+
+向 `main` 推送版本标签后，GitHub Actions 会自动构建并发布两个 macOS DMG：
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+- `aarch64`：Apple Silicon（M1/M2/M3/M4）
+- `x86_64`：Intel Mac
+
+workflow 位于 `.github/workflows/release-macos.yml`。当前默认构建未签名包；如需让 Finder 直接信任应用，还需要在 GitHub Secrets 配置 Apple Developer 签名和公证凭据。
+
 平台构建和真机验收必须在具备 macOS、Xcode、签名与设备环境的机器上执行。缺少环境时必须如实记录，不能声称已验证。
 
 ## iOS 初始化

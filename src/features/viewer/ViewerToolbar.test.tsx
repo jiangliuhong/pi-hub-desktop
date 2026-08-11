@@ -40,7 +40,10 @@ describe("ViewerToolbar", () => {
 
     const frame = await screen.findByTitle<HTMLIFrameElement>("Pi Hub");
     expect(frame).toHaveAttribute("src", "https://pi.example.com/");
-    expect(frame).toHaveAttribute("allow", "clipboard-read; clipboard-write");
+    expect(frame).toHaveAttribute(
+      "allow",
+      "clipboard-read https://pi.example.com; clipboard-write https://pi.example.com",
+    );
     expect(
       screen.queryByLabelText("打开 Pi Hub Client 菜单"),
     ).not.toBeInTheDocument();
@@ -71,6 +74,18 @@ describe("ViewerToolbar", () => {
     expect(await screen.findByText("服务列表")).toBeInTheDocument();
   });
 
+  it("opens Desktop settings from the allowlisted settings action", async () => {
+    renderViewer();
+    const frame = await screen.findByTitle<HTMLIFrameElement>("Pi Hub");
+    const openSettings = vi.fn();
+    window.addEventListener("app:open-settings", openSettings);
+
+    dispatchSettingsEvent(frame, "https://pi.example.com");
+
+    await waitFor(() => expect(openSettings).toHaveBeenCalledTimes(1));
+    window.removeEventListener("app:open-settings", openSettings);
+  });
+
   it("ignores extension events from another origin", async () => {
     renderViewer();
     const frame = await screen.findByTitle<HTMLIFrameElement>("Pi Hub");
@@ -92,6 +107,23 @@ function dispatchReturnEvent(frame: HTMLIFrameElement, origin: string) {
         type: "extension_event",
         extensionId: "pi-hub-client-menu",
         itemId: "return_to_services",
+        event: "activate",
+      },
+    }),
+  );
+}
+
+function dispatchSettingsEvent(frame: HTMLIFrameElement, origin: string) {
+  window.dispatchEvent(
+    new MessageEvent("message", {
+      source: frame.contentWindow,
+      origin,
+      data: {
+        channel: "pi-hub-host-extension",
+        protocolVersion: 1,
+        type: "extension_event",
+        extensionId: "pi-hub-client-menu",
+        itemId: "open_settings",
         event: "activate",
       },
     }),

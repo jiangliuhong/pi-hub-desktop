@@ -1,0 +1,92 @@
+name: Release macOS app
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: macos-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-release:
+    name: Build ${{ matrix.arch }}
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            target: aarch64-apple-darwin
+          - arch: x86_64
+            target: x86_64-apple-darwin
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Verify release version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          package_version="$(node -p "require('./package.json').version")"
+          tauri_version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          expected_tag="v${package_version}"
+
+          test "${RELEASE_TAG}" = "${expected_tag}" || {
+            echo "Tag ${RELEASE_TAG} does not match package version ${package_version}." >&2
+            exit 1
+          }
+
+          test "${package_version}" = "${tauri_version}" || {
+            echo "package.json (${package_version}) and tauri.conf.json (${tauri_version}) differ." >&2
+            exit 1
+          }
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build and upload macOS bundle
+        uses: tauri-apps/tauri-action@v0.6.2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # These are optional. Set them in the repository secrets to enable
+          # Apple signing and notarization without changing this workflow.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: Pi Hub Client ${{ github.ref_name }}
+          releaseBody: |
+            macOS builds for Pi Hub Client ${{ github.ref_name }}.
+
+            Download the DMG for your Mac:
+            - `aarch64` for Apple Silicon (M1/M2/M3/M4)
+            - `x86_64` for Intel
+          releaseCommitish: ${{ github.sha }}
+          releaseDraft: false
+          prerelease: false
+          generateReleaseNotes: true
+          retryAttempts: 2
+          tauriScript: npm run tauri --
+          args: --target ${{ matrix.target }}

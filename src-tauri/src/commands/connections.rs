@@ -15,8 +15,16 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ConnectResult {
-    Connected { effective_url: String },
-    HostKeyChallenge(HostKeyChallengeDto),
+    Connected {
+        effective_url: String,
+    },
+    /// Keep this as a struct variant so the Tauri JSON shape is
+    /// `{ kind: "host_key_challenge", payload: { ... } }`, matching the
+    /// frontend contract. A tuple variant does not serialize with a
+    /// `payload` field under an internally tagged enum.
+    HostKeyChallenge {
+        payload: HostKeyChallengeDto,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -53,7 +61,9 @@ pub async fn connect_service(
         ConnectFlavor::Connected { effective_url } => {
             Ok(ConnectResult::Connected { effective_url })
         }
-        ConnectFlavor::HostKeyChallenge(c) => Ok(ConnectResult::HostKeyChallenge(c.into())),
+        ConnectFlavor::HostKeyChallenge(c) => {
+            Ok(ConnectResult::HostKeyChallenge { payload: c.into() })
+        }
     }
 }
 
@@ -76,7 +86,9 @@ pub async fn respond_host_key_challenge(
         ConnectFlavor::Connected { effective_url } => {
             Ok(ConnectResult::Connected { effective_url })
         }
-        ConnectFlavor::HostKeyChallenge(c) => Ok(ConnectResult::HostKeyChallenge(c.into())),
+        ConnectFlavor::HostKeyChallenge(c) => {
+            Ok(ConnectResult::HostKeyChallenge { payload: c.into() })
+        }
     }
 }
 
@@ -133,6 +145,49 @@ pub async fn replace_known_host_and_connect(
         ConnectFlavor::Connected { effective_url } => {
             Ok(ConnectResult::Connected { effective_url })
         }
-        ConnectFlavor::HostKeyChallenge(c) => Ok(ConnectResult::HostKeyChallenge(c.into())),
+        ConnectFlavor::HostKeyChallenge(c) => {
+            Ok(ConnectResult::HostKeyChallenge { payload: c.into() })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn host_key_challenge_serializes_with_frontend_payload_shape() {
+        let challenge = HostKeyChallengeDto {
+            challenge_id: Uuid::nil(),
+            connection_id: "connection-1".into(),
+            service_id: Uuid::nil(),
+            ssh_host: "vps.example.com".into(),
+            ssh_port: 22,
+            algorithm: "ssh-ed25519".into(),
+            sha256_fingerprint: "SHA256:test".into(),
+        };
+
+        let value = serde_json::to_value(ConnectResult::HostKeyChallenge { payload: challenge })
+            .expect("connect result should serialize");
+
+        assert_eq!(value["kind"], "host_key_challenge");
+        assert_eq!(value["payload"]["ssh_host"], "vps.example.com");
+        assert_eq!(value["payload"]["ssh_port"], 22);
+        assert_eq!(
+            value,
+            json!({
+                "kind": "host_key_challenge",
+                "payload": {
+                    "challenge_id": Uuid::nil(),
+                    "connection_id": "connection-1",
+                    "service_id": Uuid::nil(),
+                    "ssh_host": "vps.example.com",
+                    "ssh_port": 22,
+                    "algorithm": "ssh-ed25519",
+                    "sha256_fingerprint": "SHA256:test"
+                }
+            })
+        );
     }
 }

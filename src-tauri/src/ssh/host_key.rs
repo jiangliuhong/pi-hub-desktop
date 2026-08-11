@@ -76,8 +76,8 @@ impl HostKeyFacts {
 
 /// Compare a presented key against a stored known host for `(host, port)`.
 pub fn check_known_host(
-    _host: &str,
-    _port: u16,
+    host: &str,
+    port: u16,
     known: Option<&KnownHostRecord>,
     presented: &PublicKey,
 ) -> Result<HostKeyCheck, SshError> {
@@ -85,6 +85,11 @@ pub fn check_known_host(
     let Some(record) = known else {
         return Ok(HostKeyCheck::Unknown(facts));
     };
+    // A record for another endpoint is not evidence of trust here. Treat the
+    // current endpoint as unknown so the user must explicitly confirm it.
+    if record.host != host || record.port != port {
+        return Ok(HostKeyCheck::Unknown(facts));
+    }
     let presented_wire = presented.public_key_bytes();
     if record.public_key == presented_wire
         && record.algorithm == facts.algorithm
@@ -196,6 +201,16 @@ mod tests {
             }
             other => panic!("expected Changed, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn same_key_on_another_endpoint_is_unknown() {
+        let key = ed25519_keypair();
+        let pub_key = to_public(&key);
+        let (record, _) = record_from_key("host-a".into(), 22, &pub_key);
+
+        let check = check_known_host("host-b", 22, Some(&record), &pub_key).unwrap();
+        assert!(matches!(check, HostKeyCheck::Unknown(_)));
     }
 
     #[test]

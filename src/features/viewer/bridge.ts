@@ -3,6 +3,7 @@ export const PI_HUB_HOST_EXTENSION_VERSION = 1;
 
 export const CLIENT_MENU_EXTENSION_ID = "pi-hub-client-menu";
 export const RETURN_TO_SERVICES_ITEM_ID = "return_to_services";
+export const OPEN_SETTINGS_ITEM_ID = "open_settings";
 
 export interface PiHubHostExtensionRegistration {
   channel: typeof PI_HUB_HOST_EXTENSION_CHANNEL;
@@ -21,6 +22,10 @@ export interface PiHubHostExtensionRegistration {
           id: typeof RETURN_TO_SERVICES_ITEM_ID;
           label: "返回列表";
         },
+        {
+          id: typeof OPEN_SETTINGS_ITEM_ID;
+          label: "设置";
+        },
       ];
     },
   ];
@@ -31,7 +36,7 @@ export interface PiHubHostExtensionEvent {
   protocolVersion: typeof PI_HUB_HOST_EXTENSION_VERSION;
   type: "extension_event";
   extensionId: typeof CLIENT_MENU_EXTENSION_ID;
-  itemId: typeof RETURN_TO_SERVICES_ITEM_ID;
+  itemId: typeof RETURN_TO_SERVICES_ITEM_ID | typeof OPEN_SETTINGS_ITEM_ID;
   event: "activate";
 }
 
@@ -52,7 +57,10 @@ export function createHostExtensionRegistration(): PiHubHostExtensionRegistratio
         kind: "menu",
         icon: "more_horizontal",
         ariaLabel: "Pi Hub Client 菜单",
-        items: [{ id: RETURN_TO_SERVICES_ITEM_ID, label: "返回列表" }],
+        items: [
+          { id: RETURN_TO_SERVICES_ITEM_ID, label: "返回列表" },
+          { id: OPEN_SETTINGS_ITEM_ID, label: "设置" },
+        ],
       },
     ],
   };
@@ -66,12 +74,14 @@ export function parsePiHubHostExtensionEvent(
     value.channel !== PI_HUB_HOST_EXTENSION_CHANNEL ||
     value.protocolVersion !== PI_HUB_HOST_EXTENSION_VERSION ||
     value.type !== "extension_event" ||
-    value.extensionId !== CLIENT_MENU_EXTENSION_ID ||
-    value.itemId !== RETURN_TO_SERVICES_ITEM_ID ||
     value.event !== "activate"
   ) {
     return null;
   }
+  if (
+    value.extensionId !== CLIENT_MENU_EXTENSION_ID ||
+    (value.itemId !== RETURN_TO_SERVICES_ITEM_ID && value.itemId !== OPEN_SETTINGS_ITEM_ID)
+  ) return null;
   return value as unknown as PiHubHostExtensionEvent;
 }
 

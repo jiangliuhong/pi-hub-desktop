@@ -32,8 +32,11 @@ use crate::local_runtime::settings::LocalRuntimeSettingsStore;
 use crate::profile::repository::ProfileStore;
 use std::path::PathBuf;
 use std::sync::Arc;
+#[cfg(desktop)]
 use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
-use tauri::{Emitter, Manager};
+#[cfg(desktop)]
+use tauri::Emitter;
+use tauri::Manager;
 
 /// Product display name shared with the frontend / about surface.
 pub const APP_NAME: &str = "Pi Hub Client";
@@ -144,30 +147,48 @@ pub fn run() {
         .manage(state.credentials)
         .manage(state.manager)
         .setup(move |app| {
-            // The macOS menu bar remains available while the Pi Hub viewer
-            // occupies the entire window. The frontend handles navigation so
-            // the remote page never receives native menu capabilities.
-            let settings = MenuItemBuilder::with_id("open-settings", "设置…")
-                .accelerator("CmdOrCtrl+,")
-                .build(app)?;
-            let return_to_services =
-                MenuItemBuilder::with_id("return-to-services", "返回服务列表").build(app)?;
-            let app_menu = SubmenuBuilder::new(app, "Pi Hub Client")
-                .item(&settings)
-                .separator()
-                .item(&return_to_services)
-                .build()?;
-            let menu = MenuBuilder::new(app).item(&app_menu).build()?;
-            app.set_menu(menu)?;
-            app.on_menu_event(|app, event| match event.id().as_ref() {
-                "open-settings" => {
-                    let _ = app.emit("app://open-settings", ());
-                }
-                "return-to-services" => {
-                    let _ = app.emit("app://return-to-services", ());
-                }
-                _ => {}
-            });
+            #[cfg(desktop)]
+            {
+                // The macOS menu bar remains available while the Pi Hub viewer
+                // occupies the entire window. The frontend handles navigation so
+                // the remote page never receives native menu capabilities.
+                let settings = MenuItemBuilder::with_id("open-settings", "设置…")
+                    .accelerator("CmdOrCtrl+,")
+                    .build(app)?;
+                let return_to_services =
+                    MenuItemBuilder::with_id("return-to-services", "返回服务列表").build(app)?;
+                let app_menu = SubmenuBuilder::new(app, "Pi Hub Client")
+                    .item(&settings)
+                    .separator()
+                    .item(&return_to_services)
+                    .build()?;
+                // macOS routes the standard Cmd/Ctrl editing shortcuts through
+                // the native Edit menu. Without these predefined items, the
+                // WebView can receive focus while Cmd+A/C/V/X appear inert.
+                let edit_menu = SubmenuBuilder::new(app, "编辑")
+                    .undo()
+                    .redo()
+                    .separator()
+                    .cut()
+                    .copy()
+                    .paste()
+                    .select_all()
+                    .build()?;
+                let menu = MenuBuilder::new(app)
+                    .item(&app_menu)
+                    .item(&edit_menu)
+                    .build()?;
+                app.set_menu(menu)?;
+                app.on_menu_event(|app, event| match event.id().as_ref() {
+                    "open-settings" => {
+                        let _ = app.emit("app://open-settings", ());
+                    }
+                    "return-to-services" => {
+                        let _ = app.emit("app://return-to-services", ());
+                    }
+                    _ => {}
+                });
+            }
 
             // Build the V2 local runtime manager with a Tauri-backed
             // broadcaster (design-v2 §16, §17.2). Construction in `setup`

@@ -88,15 +88,23 @@ enum HostKeyDecision {
 /// comparison. This is the single place a host key is trusted (AGENTS.md §6.2).
 #[derive(Clone)]
 pub struct HostKeyVerifyingHandler {
+    host: String,
+    port: u16,
     known: Option<KnownHostRecord>,
     decision: Arc<Mutex<HostKeyDecision>>,
 }
 
 impl HostKeyVerifyingHandler {
-    fn new(known: Option<KnownHostRecord>) -> (Self, Arc<Mutex<HostKeyDecision>>) {
+    fn new(
+        host: &str,
+        port: u16,
+        known: Option<KnownHostRecord>,
+    ) -> (Self, Arc<Mutex<HostKeyDecision>>) {
         let decision = Arc::new(Mutex::new(HostKeyDecision::Pending));
         (
             HostKeyVerifyingHandler {
+                host: host.to_string(),
+                port,
                 known,
                 decision: decision.clone(),
             },
@@ -114,9 +122,8 @@ impl client::Handler for HostKeyVerifyingHandler {
     ) -> Result<bool, Self::Error> {
         let presented = PresentedHostKey::from_key(server_public_key);
         let check = check_known_host(
-            // host/port are part of the known record; facts carry algorithm+fp.
-            "",
-            0,
+            &self.host,
+            self.port,
             self.known.as_ref(),
             server_public_key,
         );
@@ -180,7 +187,7 @@ async fn connect_with_timeout(
     //    rather than a generic transport error (AGENTS.md §9).
     let addr = resolve(host, port).await?;
 
-    let (handler, decision) = HostKeyVerifyingHandler::new(known.cloned());
+    let (handler, decision) = HostKeyVerifyingHandler::new(host, port, known.cloned());
 
     let config = client::Config {
         // Keepalive (design §8.5). 25s is within the suggested 20–30s band.

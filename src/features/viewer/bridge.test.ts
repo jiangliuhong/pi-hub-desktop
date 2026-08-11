@@ -18,7 +18,10 @@ describe("Pi Hub host extension bridge", () => {
           kind: "menu",
           icon: "more_horizontal",
           ariaLabel: "Pi Hub Client 菜单",
-          items: [{ id: "return_to_services", label: "返回列表" }],
+          items: [
+            { id: "return_to_services", label: "返回列表" },
+            { id: "open_settings", label: "设置" },
+          ],
         },
       ],
     });
@@ -32,6 +35,19 @@ describe("Pi Hub host extension bridge", () => {
         type: "extension_event",
         extensionId: "pi-hub-client-menu",
         itemId: "return_to_services",
+        event: "activate",
+      }),
+    ).not.toBeNull();
+  });
+
+  it("accepts the allowlisted settings activation event", () => {
+    expect(
+      parsePiHubHostExtensionEvent({
+        channel: "pi-hub-host-extension",
+        protocolVersion: 1,
+        type: "extension_event",
+        extensionId: "pi-hub-client-menu",
+        itemId: "open_settings",
         event: "activate",
       }),
     ).not.toBeNull();
