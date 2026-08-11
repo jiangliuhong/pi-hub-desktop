@@ -195,9 +195,43 @@ impl LocalRuntimeManager {
         let Some(svc) = &self.services else {
             return Err(Self::unsupported());
         };
+        // V2-FR-003 / V2-SR-001: when a *complete* Node + Pi Hub pair would be
+        // saved, validate it through the detector before persisting. Partial
+        // selections (only one of the two) are allowed so the user can build up
+        // a pair incrementally. An invalid pair is rejected without touching
+        // the store.
+        let current = svc.settings.get().await;
+        let would_node = input
+            .node_executable
+            .clone()
+            .or_else(|| current.node_executable.clone());
+        let would_entry = input
+            .pi_hub_entrypoint
+            .clone()
+            .or_else(|| current.pi_hub_entrypoint.clone());
+        if let (Some(node), Some(entry)) = (would_node.as_ref(), would_entry.as_ref()) {
+            let hints = DetectionHints {
+                persisted_node: Some(node.clone()),
+                persisted_pi_hub_entrypoint: Some(entry.clone()),
+                persisted_pi_hub_package_root: input
+                    .pi_hub_package_root
+                    .clone()
+                    .or_else(|| current.pi_hub_package_root.clone()),
+                path_dirs: app_path_dirs(),
+                home_override: None,
+            };
+            let validated = svc.detector.detect(&hints).await?;
+            if validated.node.is_none() || validated.pi_hub.is_none() {
+                return Err(LocalRuntimeError::PiHubInstallationInvalid(
+                    "所选 Node.js 或 Pi Hub 入口未能通过验证（包身份/版本/构建产物）".into(),
+                ));
+            }
+        }
         let updated = svc.settings.update(input).await?;
-        // A settings change invalidates installation/doctor caches and clears
-        // crash-loop protection (design-v2 §14.2 recovery).
+        // A settings change invalidates the doctor cache (design-v2 §8.5) and
+        // clears crash-loop protection (§14.2 recovery).
+        self.patch_snapshot(|s| s.environment = EnvironmentReport::default())
+            .await;
         let _ = svc.settings.clear_auto_start_failures().await;
         Ok(updated)
     }
@@ -269,14 +303,7 @@ impl LocalRuntimeManager {
         let settings = svc.settings.get().await;
 
         // Detect installations.
-        let hints = DetectionHints {
-            persisted_node: settings.node_executable.clone(),
-            persisted_pi_hub_entrypoint: settings.pi_hub_entrypoint.clone(),
-            persisted_pi_hub_package_root: settings.pi_hub_package_root.clone(),
-            path_dirs: app_path_dirs(),
-            home_override: None,
-        };
-        let installation = svc.detector.detect(&hints).await?;
+        let installation = svc.detector.detect(&hints_from_settings(&settings)).await?;
 
         let installation_state = classify_installation(&installation, &settings);
 
@@ -338,8 +365,8 @@ impl LocalRuntimeManager {
                 }
             }
         }
-        let settings = svc.settings.get().await;
-        let (node, entry, root) = match resolve_installation_triple(&settings).await {
+        let set = self.detect_validated().await?;
+        let (node, entry, root) = match installation_triple(&set) {
             Some(t) => t,
             None => {
                 // No usable installation → blocked report.
@@ -353,6 +380,7 @@ impl LocalRuntimeManager {
                 return Ok(report);
             }
         };
+        let settings = svc.settings.get().await;
         let ctx = DoctorContext {
             node_executable: node,
             pi_hub_entrypoint: entry,
@@ -403,12 +431,15 @@ impl LocalRuntimeManager {
             _ => {}
         }
 
-        // 2. Validate installation triple.
-        let (node, entry, root) = resolve_installation_triple(&settings).await.ok_or(
+        // 2. Validate installation via the detector (V2-SR-001: only a
+        //    detector-verified Node + Pi Hub pair may be launched — never a
+        //    raw exists()-checked path).
+        let set = self.detect_validated().await?;
+        let (node, entry, root) = installation_triple(&set).ok_or_else(|| {
             LocalRuntimeError::PiHubInstallationInvalid(
-                "no usable installation; run a scan first".into(),
-            ),
-        )?;
+                "no verified Node.js + Pi Hub installation; run a scan or set valid paths".into(),
+            )
+        })?;
 
         // 3. Required doctor checks (refresh if stale).
         let blocked = self
@@ -670,6 +701,19 @@ impl LocalRuntimeManager {
         self.generation.load(Ordering::SeqCst)
     }
 
+    /// Re-run the detector with the persisted paths as hints and return the
+    /// *validated* installation set. This is the single chokepoint that turns
+    /// user-supplied paths into verified absolute binaries (V2-SR-001, design-v2
+    /// §6.4/§16): no caller may launch from raw `exists()`-checked paths.
+    async fn detect_validated(&self) -> Result<InstallationSet, LocalRuntimeError> {
+        let svc = self
+            .services
+            .as_ref()
+            .ok_or(LocalRuntimeError::UnsupportedPlatform)?;
+        let settings = svc.settings.get().await;
+        svc.detector.detect(&hints_from_settings(&settings)).await
+    }
+
     async fn resolve_password(&self, settings: &LocalRuntimeSettings) -> Option<ProcessSecret> {
         let svc = self.services.as_ref()?;
         let id = settings.pi_hub_credential_id.as_ref()?;
@@ -809,21 +853,30 @@ fn classify_installation(
     }
 }
 
-/// Resolve the (node, entrypoint, package_root) triple from the persisted
-/// settings + detected set. Returns None if not usable.
-async fn resolve_installation_triple(
-    settings: &LocalRuntimeSettings,
-) -> Option<(PathBuf, PathBuf, PathBuf)> {
-    let node = settings.node_executable.clone()?;
-    let entry = settings.pi_hub_entrypoint.clone()?;
-    let root = settings
-        .pi_hub_package_root
-        .clone()
-        .or_else(|| entry.parent().map(PathBuf::from))?;
-    if !node.exists() || !entry.exists() {
-        return None;
+/// Build detection hints from the persisted settings (persisted paths act
+/// as the highest-priority candidates; the detector still validates them).
+fn hints_from_settings(settings: &LocalRuntimeSettings) -> DetectionHints {
+    DetectionHints {
+        persisted_node: settings.node_executable.clone(),
+        persisted_pi_hub_entrypoint: settings.pi_hub_entrypoint.clone(),
+        persisted_pi_hub_package_root: settings.pi_hub_package_root.clone(),
+        path_dirs: app_path_dirs(),
+        home_override: None,
     }
-    Some((node, entry, root))
+}
+
+/// Extract the validated (canonical node, entrypoint, package root) triple
+/// from a detector-returned set. Only present when the detector confirmed a
+/// usable Node + Pi Hub pair (so callers can never receive an unverified
+/// arbitrary path here).
+fn installation_triple(set: &InstallationSet) -> Option<(PathBuf, PathBuf, PathBuf)> {
+    let node = set.node.as_ref()?;
+    let pi_hub = set.pi_hub.as_ref()?;
+    Some((
+        node.canonical_executable.clone(),
+        pi_hub.entrypoint.clone(),
+        pi_hub.package_root.clone(),
+    ))
 }
 
 fn blocked_no_installation() -> CheckResult {
@@ -898,7 +951,11 @@ pub mod test_support {
         }
     }
 
-    /// A detector fake returning a preset set.
+    /// A detector fake. When both `persisted_node` and `persisted_pi_hub_entrypoint`
+    /// are present in the hints, it echoes them as a *validated* pair (mirrors
+    /// the real detector's contract after a successful validation), so the
+    /// manager's start path can exercise the full flow without a real Node/Pi
+    /// Hub on the host. Otherwise it returns its preset `set`.
     pub struct FakeDetector {
         pub set: InstallationSet,
     }
@@ -906,9 +963,46 @@ pub mod test_support {
     impl InstallationDetector for FakeDetector {
         async fn detect(
             &self,
+            hints: &DetectionHints,
+        ) -> Result<InstallationSet, LocalRuntimeError> {
+            if let (Some(node), Some(entry)) =
+                (&hints.persisted_node, &hints.persisted_pi_hub_entrypoint)
+            {
+                return Ok(InstallationSet {
+                    node: Some(NodeInstallation {
+                        executable: node.clone(),
+                        canonical_executable: node.clone(),
+                        version: "24.19.0".into(),
+                        source: InstallationSource::Manual,
+                    }),
+                    pi_hub: Some(PiHubInstallation {
+                        package_root: hints
+                            .persisted_pi_hub_package_root
+                            .clone()
+                            .or_else(|| entry.parent().map(PathBuf::from))
+                            .unwrap_or_else(|| PathBuf::from(".")),
+                        entrypoint: entry.clone(),
+                        version: "0.0.42".into(),
+                        node_requirement: ">=22.19.0".into(),
+                        source: InstallationSource::Manual,
+                    }),
+                    pi_cli: None,
+                });
+            }
+            Ok(self.set.clone())
+        }
+    }
+
+    /// A detector that always reports no installation, used to assert the
+    /// manager rejects unverified paths.
+    pub struct EmptyDetector;
+    #[async_trait]
+    impl InstallationDetector for EmptyDetector {
+        async fn detect(
+            &self,
             _hints: &DetectionHints,
         ) -> Result<InstallationSet, LocalRuntimeError> {
-            Ok(self.set.clone())
+            Ok(InstallationSet::default())
         }
     }
 
@@ -1066,11 +1160,25 @@ mod tests {
         doctor: Arc<dyn PiEnvironmentDoctor>,
         supervisor: Arc<FakeSupervisor>,
     ) -> LocalRuntimeManager {
-        let settings = Arc::new(LocalRuntimeSettingsStore::in_memory());
-        let services = Services {
-            detector: Arc::new(FakeDetector {
+        manager_with_detector(
+            probe,
+            doctor,
+            supervisor,
+            Arc::new(FakeDetector {
                 set: InstallationSet::default(),
             }),
+        )
+    }
+
+    fn manager_with_detector(
+        probe: Arc<dyn LocalServiceProbe>,
+        doctor: Arc<dyn PiEnvironmentDoctor>,
+        supervisor: Arc<FakeSupervisor>,
+        detector: Arc<dyn InstallationDetector>,
+    ) -> LocalRuntimeManager {
+        let settings = Arc::new(LocalRuntimeSettingsStore::in_memory());
+        let services = Services {
+            detector,
             doctor,
             probe,
             supervisor,
@@ -1152,6 +1260,133 @@ mod tests {
         );
         let snap = mgr.refresh().await.unwrap();
         assert_eq!(snap.runtime_state, LocalRuntimeState::PortConflict);
+    }
+
+    #[tokio::test]
+    async fn start_rejects_unverified_installation() {
+        // C1: with no persisted paths the detector returns no pair, so start
+        // must refuse to launch anything (no exists()-only shortcut).
+        let supervisor = Arc::new(FakeSupervisor::new());
+        let p = paired_probe(
+            &supervisor,
+            ProbeResult::NotListening,
+            ProbeResult::PiHub {
+                version: "0.0.42".into(),
+                protocol_version: 1,
+            },
+        );
+        let mgr = manager_with_supervisor(
+            Arc::new(p),
+            Arc::new(FakeDoctor {
+                report: ready_report(),
+            }),
+            supervisor.clone(),
+        );
+        // No persist_fake_installation → detector reports no installation.
+        let res = mgr.start().await;
+        assert!(matches!(
+            res,
+            Err(LocalRuntimeError::PiHubInstallationInvalid(_))
+        ));
+        // The supervisor must never have been asked to spawn.
+        assert_eq!(
+            supervisor.starts.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn update_settings_rejects_invalid_pair() {
+        // C2: a complete Node + Pi Hub pair that the detector cannot validate
+        // must be rejected *before* it is persisted.
+        let supervisor = Arc::new(FakeSupervisor::new());
+        let p = paired_probe(
+            &supervisor,
+            ProbeResult::NotListening,
+            ProbeResult::NotListening,
+        );
+        let mgr = manager_with_detector(
+            Arc::new(p),
+            Arc::new(FakeDoctor {
+                report: ready_report(),
+            }),
+            supervisor.clone(),
+            Arc::new(EmptyDetector),
+        );
+        let res = mgr
+            .update_settings(crate::local_runtime::settings::LocalRuntimeSettingsUpdate {
+                node_executable: Some(PathBuf::from("/bin/echo")),
+                pi_hub_entrypoint: Some(PathBuf::from("/etc/passwd")),
+                ..Default::default()
+            })
+            .await;
+        assert!(matches!(
+            res,
+            Err(LocalRuntimeError::PiHubInstallationInvalid(_))
+        ));
+        // Nothing was persisted.
+        let svc = mgr.services.as_ref().unwrap();
+        assert!(svc.settings.get().await.node_executable.is_none());
+        assert!(svc.settings.get().await.pi_hub_entrypoint.is_none());
+    }
+
+    #[tokio::test]
+    async fn update_settings_allows_partial_selection() {
+        // Saving only the Node path (no Pi Hub yet) is allowed — the pair is
+        // validated only once both halves are present.
+        let mgr = manager_with(
+            Arc::new(probe(ProbeResult::NotListening)),
+            Arc::new(FakeDoctor {
+                report: ready_report(),
+            }),
+        );
+        let updated = mgr
+            .update_settings(crate::local_runtime::settings::LocalRuntimeSettingsUpdate {
+                node_executable: Some(PathBuf::from("/usr/local/bin/node")),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            updated.node_executable.as_deref(),
+            Some(std::path::Path::new("/usr/local/bin/node"))
+        );
+    }
+
+    #[tokio::test]
+    async fn update_settings_invalidates_doctor_cache() {
+        // M1: changing install paths must drop a cached doctor report so a
+        // subsequent non-forced run re-checks against the new paths.
+        let mgr = manager_with(
+            Arc::new(probe(ProbeResult::NotListening)),
+            Arc::new(FakeDoctor {
+                report: ready_report(),
+            }),
+        );
+        // Seed a cached environment report.
+        mgr.patch_snapshot(|s| {
+            s.environment = EnvironmentReport {
+                overall: EnvironmentStatus::Blocked,
+                generated_at: Some(Utc::now()),
+                checks: vec![],
+            };
+        })
+        .await;
+        assert_eq!(
+            mgr.snapshot().await.environment.overall,
+            EnvironmentStatus::Blocked
+        );
+        // A port-only change still invalidates the cache.
+        mgr.update_settings(crate::local_runtime::settings::LocalRuntimeSettingsUpdate {
+            port: Some(30200),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            mgr.snapshot().await.environment.overall,
+            EnvironmentStatus::Unknown
+        );
     }
 
     #[tokio::test]
