@@ -384,3 +384,229 @@ fieldset.field label {
   font-size: 0.75rem;
   color: var(--muted);
 }
+
+/* ===== V2 local runtime (docs/design-v2.md) ===== */
+
+.local-runtime-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1rem 1.1rem;
+  margin-bottom: 1.25rem;
+  background: var(--panel);
+}
+
+.local-runtime-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.local-runtime-header h2 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.badge {
+  font-size: 0.75rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+
+.badge-running_managed,
+.badge-running_external {
+  color: #6fe39a;
+  border-color: #2e6b48;
+}
+
+.badge-failed,
+.badge-port_conflict {
+  color: #ff8b8b;
+  border-color: #6b2e2e;
+}
+
+.local-runtime-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin: 0.5rem 0 0.25rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.local-runtime-meta .mono,
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.local-runtime-env {
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin: 0.25rem 0 0.5rem;
+}
+
+.env-ready {
+  color: #6fe39a;
+}
+.env-degraded {
+  color: #f0c674;
+}
+.env-blocked {
+  color: #ff8b8b;
+}
+.env-unknown {
+  color: var(--muted);
+}
+
+.local-runtime-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  margin-top: 0.5rem;
+}
+
+.local-runtime-actions button,
+.local-runtime-actions a {
+  padding: 0.35rem 0.75rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  text-decoration: none;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.local-runtime-actions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Settings / doctor / logs pages */
+
+.local-runtime-settings,
+.local-runtime-doctor,
+.local-runtime-logs {
+  max-width: 640px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin: 0.75rem 0;
+}
+
+.field > span {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.field input[type="text"],
+.field input[type="number"] {
+  padding: 0.4rem 0.5rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+}
+
+.field-inline {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.info-banner {
+  background: rgba(79, 140, 255, 0.12);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+  color: #bcd4ff;
+  font-size: 0.85rem;
+  margin: 0.5rem 0;
+}
+
+.doctor-header,
+.logs-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.doctor-groups {
+  margin-top: 0.75rem;
+}
+
+.doctor-group {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.5rem 0.75rem;
+  margin: 0.5rem 0;
+}
+
+.doctor-group h3 {
+  margin: 0 0 0.25rem;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.doctor-group ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.check {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 0.4rem 0.5rem;
+  padding: 0.3rem 0;
+  font-size: 0.85rem;
+  align-items: baseline;
+}
+
+.check-symbol {
+  font-weight: 700;
+}
+.check-pass .check-symbol {
+  color: #6fe39a;
+}
+.check-warn .check-symbol {
+  color: #f0c674;
+}
+.check-fail .check-symbol {
+  color: #ff8b8b;
+}
+.check-skipped .check-symbol {
+  color: var(--muted);
+}
+
+.check-severity {
+  font-size: 0.7rem;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+
+.check-remediation {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.logs-view {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.75rem;
+  font-size: 0.78rem;
+  max-height: 60vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

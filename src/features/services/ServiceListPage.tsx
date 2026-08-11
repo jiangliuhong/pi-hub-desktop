@@ -3,6 +3,8 @@ import { Link, useNavigate } from "react-router-dom";
 import { deleteService, listServices } from "./api";
 import type { ServiceProfile } from "./model";
 import { connectionStateLabel } from "../connection/model";
+import { LocalRuntimeCard } from "../local-runtime/LocalRuntimeCard";
+import { getLocalRuntimePlatformSupport } from "../local-runtime/api";
 import { PagePlaceholder } from "../../components/PagePlaceholder";
 import type { AppErrorDto } from "../../lib/tauri";
 
@@ -21,6 +23,7 @@ export function ServiceListPage() {
     null,
   );
   const [deleting, setDeleting] = useState(false);
+  const [localRuntimeSupported, setLocalRuntimeSupported] = useState(false);
   const navigate = useNavigate();
 
   const reload = useCallback(async () => {
@@ -37,6 +40,8 @@ export function ServiceListPage() {
 
   useEffect(() => {
     void reload();
+    // V2: hide the local runtime card on iOS (requirements-v2 §4.2).
+    void getLocalRuntimePlatformSupport().then(setLocalRuntimeSupported);
   }, [reload]);
 
   const confirmDelete = async () => {
@@ -74,6 +79,7 @@ export function ServiceListPage() {
 
   return (
     <div>
+      {localRuntimeSupported ? <LocalRuntimeCard /> : null}
       {error ? (
         <div role="alert" className="error-banner">
           {error}

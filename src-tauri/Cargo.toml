@@ -33,6 +33,7 @@ tokio = { version = "1", features = [
     "sync",
     "time",
     "fs",
+    "process",
 ] }
 tokio-util = { version = "0.7", features = ["rt"] } # CancellationToken
 
@@ -62,6 +63,18 @@ russh = "0.51"
 # reaching into russh internals.
 sha2 = "0.10"
 base64 = "0.22"
+
+# --- V2 local runtime domain (docs/design-v2.md §19) ---
+# Justification: parsing + comparing Node / Pi Hub / Pi CLI versions and the
+# npm-style `engines.node` range (design-v2 §5, §6). std has no semver parser.
+# Builds on all targets incl. `aarch64-apple-ios` and the iOS simulator.
+semver = "1"
+# Justification: sending SIGTERM / SIGKILL to a managed *process group* on
+# macOS (design-v2 §11.7, AGENTS.md §6.6). std `Child::kill` only targets the
+# direct child; POSIX `killpg` is required to clean up the Next.js subtree.
+# Wrapped in a single platform module (design-v2 §11.7); never used in the
+# business layer. Minimal, ubiquitous crate; no unsafe spread.
+libc = "0.2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util", "rt-multi-thread", "macros"] }

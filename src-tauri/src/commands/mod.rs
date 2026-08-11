@@ -6,5 +6,6 @@
 
 pub mod connections;
 pub mod credentials;
+pub mod local_runtime;
 pub mod profiles;
 pub mod viewer;

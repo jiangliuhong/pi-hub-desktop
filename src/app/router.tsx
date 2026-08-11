@@ -3,6 +3,9 @@ import { ServiceListPage } from "../features/services/ServiceListPage";
 import { ServiceFormPage } from "../features/services/ServiceFormPage";
 import { ConnectionPage } from "../features/connection/ConnectionPage";
 import { ViewerToolbar } from "../features/viewer/ViewerToolbar";
+import { LocalRuntimeSettingsPage } from "../features/local-runtime/LocalRuntimeSettingsPage";
+import { EnvironmentDoctorPage } from "../features/local-runtime/EnvironmentDoctorPage";
+import { RuntimeLogsPage } from "../features/local-runtime/RuntimeLogsPage";
 import { PagePlaceholder } from "../components/PagePlaceholder";
 
 /**
@@ -24,6 +27,15 @@ export function AppRoutes() {
       />
       <Route path="/connect/:id" element={<ConnectionPage />} />
       <Route path="/viewer/:id" element={<ViewerToolbar />} />
+      <Route
+        path="/local-runtime/settings"
+        element={<LocalRuntimeSettingsPage />}
+      />
+      <Route
+        path="/local-runtime/environment"
+        element={<EnvironmentDoctorPage />}
+      />
+      <Route path="/local-runtime/logs" element={<RuntimeLogsPage />} />
       <Route
         path="*"
         element={

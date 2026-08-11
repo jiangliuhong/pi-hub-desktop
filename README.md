@@ -151,12 +151,12 @@ src-tauri/src/commands/local_runtime.rs
 
 ## 开发环境
 
-| 工具 | 要求 |
-|---|---|
-| Node | 24，见 `.nvmrc` |
-| Rust | stable，见 `rust-toolchain.toml` |
-| macOS 构建 | macOS + Xcode |
-| iOS 构建 | macOS + Xcode + Apple Rust targets |
+| 工具       | 要求                               |
+| ---------- | ---------------------------------- |
+| Node       | 24，见 `.nvmrc`                    |
+| Rust       | stable，见 `rust-toolchain.toml`   |
+| macOS 构建 | macOS + Xcode                      |
+| iOS 构建   | macOS + Xcode + Apple Rust targets |
 
 安装依赖：
 
@@ -214,3 +214,40 @@ npm run tauri ios build
 
 - macOS 14.0
 - iOS 17.0
+
+## V2 实现进度与验证状态
+
+### 已实现（Desktop 侧）
+
+- 本机 Runtime 领域层（`src-tauri/src/local_runtime/`）：`model`、`settings`、`detector`、`doctor`、`health`、`logs`、`redaction`、`process`、`manager`。
+- Tauri 命令（`commands/local_runtime.rs`）：状态、扫描、验证、Doctor、启动、停止、重启、设置、日志、平台支持判定。
+- 生命周期：App 打开时异步初始化 + 可选自动启动 + 崩溃循环保护；`ExitRequested` 时按设置停止受管进程。
+- 前端（`src/features/local-runtime/`）：This Mac 卡片、设置页、Environment Doctor 页、日志页、路由、标签与类型。
+- iOS 门控：本机 Runtime 命令返回 `unsupported_platform`，UI 隐藏入口（`get_local_runtime_platform_support`）。
+
+### 已执行的检查
+
+| 检查                                        | 结果                          |
+| ------------------------------------------- | ----------------------------- |
+| `npm run format:check`                      | 通过                          |
+| `npm run lint`                              | 通过                          |
+| `npm run typecheck`                         | 通过                          |
+| `npm test`（前端）                          | 45 通过                       |
+| `npm run build`（Vite 产物）                | 通过                          |
+| `cargo fmt --check`                         | 通过                          |
+| `cargo clippy --all-targets -- -D warnings` | 通过                          |
+| `cargo test`（Rust）                        | 119 通过（115 单元 + 4 集成） |
+
+Rust 单元测试覆盖：脱敏、日志环形缓冲、设置迁移与原子写入、安装发现与包身份验证、Node 版本基线、Doctor JSON 解析与聚合、HTTP 探测（含 chunked 与 client-info 协议）、进程组启停、状态机、崩溃循环保护。
+
+### 未验证项（需真机 / 跨仓库环境）
+
+以下在当前环境（Linux 开发机）无法执行，必须在 macOS / iOS 真机环境验证后才能声称完成（AGENTS.md §13、§15、§16）：
+
+- `npm run tauri build`（需 macOS + 代码签名）。
+- `npm run tauri ios build`（需 macOS + Xcode + Apple Rust target）。
+- macOS 真机矩阵：Homebrew / NVM / Volta / FNM、Finder 启动、外部进程、端口冲突、Node 过低、Agent 目录不可写、无认证 / 无模型、`Cmd + Q`、签名公证后的 DMG。
+- iOS 回归：Direct URL、SSH Forward、Host Key、Viewer、Keychain、本机 Runtime 入口不可见。
+- Pi Hub 跨仓库契约（`--version --json`、`doctor --json --offline`、`/api/client-info`、SIGTERM/SIGINT 转发）须在 `jiangliuhong/pi-hub` 实现并测试稳定后才能进入端到端真机验收。
+
+Desktop 侧 Doctor 解析器已按 design-v2 §8.3 的 schema 实现，并包含 schemaVersion / 退出码一致性校验；在真实 Doctor 输出可用前，无法通过实际调用验证聚合结果。

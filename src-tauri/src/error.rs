@@ -36,6 +36,31 @@ pub enum ErrorCode {
     NotFound,
     Io,
     Internal,
+    // --- V2 local runtime codes (docs/design-v2.md §18) ---
+    LocalRuntimeUnsupportedPlatform,
+    LocalRuntimeOperationInProgress,
+    NodeNotFound,
+    NodeVersionIncompatible,
+    NodeExecutionFailed,
+    PiHubNotFound,
+    PiHubInstallationInvalid,
+    PiHubVersionIncompatible,
+    PiHubDoctorInvalidOutput,
+    PiHubDoctorBlocked,
+    PiAgentDirUnavailable,
+    PiSessionDirUnavailable,
+    PiAuthNotConfigured,
+    PiModelNotAvailable,
+    LocalPortConflict,
+    LocalServiceProbeTimeout,
+    LocalServiceProtocolIncompatible,
+    LocalProcessStartFailed,
+    LocalProcessExitedEarly,
+    LocalProcessNotOwned,
+    LocalProcessStopTimeout,
+    LocalPortNotReleased,
+    AutoStartSuppressed,
+    LocalRuntimeCancelled,
 }
 
 impl ErrorCode {
@@ -62,7 +87,34 @@ impl ErrorCode {
             | ErrorCode::Cancelled
             | ErrorCode::UnsupportedPlatform
             | ErrorCode::NotFound
-            | ErrorCode::Internal => false,
+            | ErrorCode::Internal
+            // V2 local runtime errors are never auto-retried by the V1
+            // connection backoff path; the manager owns its own polling and
+            // crash-loop protection (design-v2 §12.2, §14.2).
+            | ErrorCode::LocalRuntimeUnsupportedPlatform
+            | ErrorCode::LocalRuntimeOperationInProgress
+            | ErrorCode::NodeNotFound
+            | ErrorCode::NodeVersionIncompatible
+            | ErrorCode::NodeExecutionFailed
+            | ErrorCode::PiHubNotFound
+            | ErrorCode::PiHubInstallationInvalid
+            | ErrorCode::PiHubVersionIncompatible
+            | ErrorCode::PiHubDoctorInvalidOutput
+            | ErrorCode::PiHubDoctorBlocked
+            | ErrorCode::PiAgentDirUnavailable
+            | ErrorCode::PiSessionDirUnavailable
+            | ErrorCode::PiAuthNotConfigured
+            | ErrorCode::PiModelNotAvailable
+            | ErrorCode::LocalPortConflict
+            | ErrorCode::LocalServiceProbeTimeout
+            | ErrorCode::LocalServiceProtocolIncompatible
+            | ErrorCode::LocalProcessStartFailed
+            | ErrorCode::LocalProcessExitedEarly
+            | ErrorCode::LocalProcessNotOwned
+            | ErrorCode::LocalProcessStopTimeout
+            | ErrorCode::LocalPortNotReleased
+            | ErrorCode::AutoStartSuppressed
+            | ErrorCode::LocalRuntimeCancelled => false,
         }
     }
 
@@ -88,6 +140,30 @@ impl ErrorCode {
             ErrorCode::NotFound => "not_found",
             ErrorCode::Io => "io",
             ErrorCode::Internal => "internal",
+            ErrorCode::LocalRuntimeUnsupportedPlatform => "local_runtime_unsupported_platform",
+            ErrorCode::LocalRuntimeOperationInProgress => "local_runtime_operation_in_progress",
+            ErrorCode::NodeNotFound => "node_not_found",
+            ErrorCode::NodeVersionIncompatible => "node_version_incompatible",
+            ErrorCode::NodeExecutionFailed => "node_execution_failed",
+            ErrorCode::PiHubNotFound => "pi_hub_not_found",
+            ErrorCode::PiHubInstallationInvalid => "pi_hub_installation_invalid",
+            ErrorCode::PiHubVersionIncompatible => "pi_hub_version_incompatible",
+            ErrorCode::PiHubDoctorInvalidOutput => "pi_hub_doctor_invalid_output",
+            ErrorCode::PiHubDoctorBlocked => "pi_hub_doctor_blocked",
+            ErrorCode::PiAgentDirUnavailable => "pi_agent_dir_unavailable",
+            ErrorCode::PiSessionDirUnavailable => "pi_session_dir_unavailable",
+            ErrorCode::PiAuthNotConfigured => "pi_auth_not_configured",
+            ErrorCode::PiModelNotAvailable => "pi_model_not_available",
+            ErrorCode::LocalPortConflict => "local_port_conflict",
+            ErrorCode::LocalServiceProbeTimeout => "local_service_probe_timeout",
+            ErrorCode::LocalServiceProtocolIncompatible => "local_service_protocol_incompatible",
+            ErrorCode::LocalProcessStartFailed => "local_process_start_failed",
+            ErrorCode::LocalProcessExitedEarly => "local_process_exited_early",
+            ErrorCode::LocalProcessNotOwned => "local_process_not_owned",
+            ErrorCode::LocalProcessStopTimeout => "local_process_stop_timeout",
+            ErrorCode::LocalPortNotReleased => "local_port_not_released",
+            ErrorCode::AutoStartSuppressed => "auto_start_suppressed",
+            ErrorCode::LocalRuntimeCancelled => "local_runtime_cancelled",
         }
     }
 }
@@ -116,6 +192,9 @@ pub enum AppError {
     #[error("platform error: {0}")]
     Platform(#[from] PlatformError),
 
+    #[error("local runtime error: {0}")]
+    LocalRuntime(#[from] LocalRuntimeError),
+
     #[error("operation cancelled")]
     Cancelled,
 }
@@ -131,6 +210,7 @@ impl AppError {
             AppError::Service(e) => e.code(),
             AppError::Viewer(e) => e.code(),
             AppError::Platform(e) => e.code(),
+            AppError::LocalRuntime(e) => e.code(),
             AppError::Cancelled => ErrorCode::Cancelled,
         }
     }
@@ -171,6 +251,7 @@ impl AppError {
             AppError::Service(e) => e.user_message(),
             AppError::Viewer(e) => e.user_message(),
             AppError::Platform(e) => e.user_message(),
+            AppError::LocalRuntime(e) => e.user_message(),
             AppError::Cancelled => "操作已取消。".to_string(),
         }
     }
@@ -385,6 +466,224 @@ impl PlatformError {
             PlatformError::Unsupported => "当前平台不受支持。".to_string(),
             PlatformError::Other(_) => "平台适配层发生错误。".to_string(),
         }
+    }
+}
+
+/// V2 local runtime domain errors (docs/design-v2.md §18).
+///
+/// Each variant carries enough non-sensitive context to build an actionable
+/// `ErrorDto`. Secrets, full environment dumps and raw stdout are never stored
+/// here (AGENTS.md §6.1, V2-SR-003/004).
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum LocalRuntimeError {
+    #[error("local runtime is not supported on this platform")]
+    UnsupportedPlatform,
+    #[error("another local runtime operation is already in progress")]
+    OperationInProgress,
+    #[error("node.js was not found")]
+    NodeNotFound,
+    #[error("node.js version {version} does not satisfy {required_version}")]
+    NodeVersionIncompatible {
+        version: String,
+        required_version: String,
+    },
+    #[error("node.js execution failed: {0}")]
+    NodeExecutionFailed(String),
+    #[error("pi hub was not found")]
+    PiHubNotFound,
+    #[error("pi hub installation is invalid: {0}")]
+    PiHubInstallationInvalid(String),
+    #[error("pi hub version {version} does not satisfy {required_version}")]
+    PiHubVersionIncompatible {
+        version: String,
+        required_version: String,
+    },
+    #[error("pi hub doctor output could not be parsed: {0}")]
+    DoctorInvalidOutput(String),
+    #[error("pi hub environment check is blocked: {0}")]
+    DoctorBlocked(String),
+    #[error("pi agent directory is unavailable: {0}")]
+    PiAgentDirUnavailable(String),
+    #[error("pi session directory is unavailable: {0}")]
+    PiSessionDirUnavailable(String),
+    #[error("pi authentication is not configured")]
+    PiAuthNotConfigured,
+    #[error("no pi model is available")]
+    PiModelNotAvailable,
+    #[error("local port {port} is already in use")]
+    PortConflict { port: u16 },
+    #[error("local service probe timed out")]
+    ServiceProbeTimeout,
+    #[error("local service protocol is incompatible (got protocol {got}, supported {min}-{max})")]
+    ServiceProtocolIncompatible { got: u32, min: u32, max: u32 },
+    #[error("local process failed to start: {0}")]
+    ProcessStartFailed(String),
+    #[error("local process exited early (exit code {exit_code:?})")]
+    ProcessExitedEarly { exit_code: Option<i32> },
+    #[error("local process is not owned by this app")]
+    ProcessNotOwned,
+    #[error("local process did not stop within the graceful period")]
+    ProcessStopTimeout,
+    #[error("local port {port} was not released after stop")]
+    PortNotReleased { port: u16 },
+    #[error("automatic start is suppressed due to repeated failures")]
+    AutoStartSuppressed,
+    #[error("local runtime operation cancelled")]
+    Cancelled,
+    #[error("local runtime internal error: {0}")]
+    Internal(String),
+}
+
+impl LocalRuntimeError {
+    pub fn code(&self) -> ErrorCode {
+        match self {
+            LocalRuntimeError::UnsupportedPlatform => ErrorCode::LocalRuntimeUnsupportedPlatform,
+            LocalRuntimeError::OperationInProgress => ErrorCode::LocalRuntimeOperationInProgress,
+            LocalRuntimeError::NodeNotFound => ErrorCode::NodeNotFound,
+            LocalRuntimeError::NodeVersionIncompatible { .. } => ErrorCode::NodeVersionIncompatible,
+            LocalRuntimeError::NodeExecutionFailed(_) => ErrorCode::NodeExecutionFailed,
+            LocalRuntimeError::PiHubNotFound => ErrorCode::PiHubNotFound,
+            LocalRuntimeError::PiHubInstallationInvalid(_) => ErrorCode::PiHubInstallationInvalid,
+            LocalRuntimeError::PiHubVersionIncompatible { .. } => {
+                ErrorCode::PiHubVersionIncompatible
+            }
+            LocalRuntimeError::DoctorInvalidOutput(_) => ErrorCode::PiHubDoctorInvalidOutput,
+            LocalRuntimeError::DoctorBlocked(_) => ErrorCode::PiHubDoctorBlocked,
+            LocalRuntimeError::PiAgentDirUnavailable(_) => ErrorCode::PiAgentDirUnavailable,
+            LocalRuntimeError::PiSessionDirUnavailable(_) => ErrorCode::PiSessionDirUnavailable,
+            LocalRuntimeError::PiAuthNotConfigured => ErrorCode::PiAuthNotConfigured,
+            LocalRuntimeError::PiModelNotAvailable => ErrorCode::PiModelNotAvailable,
+            LocalRuntimeError::PortConflict { .. } => ErrorCode::LocalPortConflict,
+            LocalRuntimeError::ServiceProbeTimeout => ErrorCode::LocalServiceProbeTimeout,
+            LocalRuntimeError::ServiceProtocolIncompatible { .. } => {
+                ErrorCode::LocalServiceProtocolIncompatible
+            }
+            LocalRuntimeError::ProcessStartFailed(_) => ErrorCode::LocalProcessStartFailed,
+            LocalRuntimeError::ProcessExitedEarly { .. } => ErrorCode::LocalProcessExitedEarly,
+            LocalRuntimeError::ProcessNotOwned => ErrorCode::LocalProcessNotOwned,
+            LocalRuntimeError::ProcessStopTimeout => ErrorCode::LocalProcessStopTimeout,
+            LocalRuntimeError::PortNotReleased { .. } => ErrorCode::LocalPortNotReleased,
+            LocalRuntimeError::AutoStartSuppressed => ErrorCode::AutoStartSuppressed,
+            LocalRuntimeError::Cancelled => ErrorCode::LocalRuntimeCancelled,
+            LocalRuntimeError::Internal(_) => ErrorCode::Internal,
+        }
+    }
+
+    fn user_message(&self) -> String {
+        match self {
+            LocalRuntimeError::UnsupportedPlatform => {
+                "当前平台不支持本机 Pi Hub 管理。".to_string()
+            }
+            LocalRuntimeError::OperationInProgress => {
+                "本机 Pi Hub 正在执行其他操作，请稍候。".to_string()
+            }
+            LocalRuntimeError::NodeNotFound => {
+                "未找到 Node.js，请在设置中手动选择 Node.js 安装路径。".to_string()
+            }
+            LocalRuntimeError::NodeVersionIncompatible {
+                version,
+                required_version,
+            } => format!(
+                "Node.js 版本 {version} 不满足要求（需 {required_version}），请升级 Node.js。"
+            ),
+            LocalRuntimeError::NodeExecutionFailed(_) => {
+                "执行 Node.js 失败，请检查安装路径是否有效。".to_string()
+            }
+            LocalRuntimeError::PiHubNotFound => {
+                "未找到 Pi Hub 安装，请在设置中选择 Pi Hub 入口。".to_string()
+            }
+            LocalRuntimeError::PiHubInstallationInvalid(_) => {
+                "Pi Hub 安装无效，包身份或构建产物校验失败。".to_string()
+            }
+            LocalRuntimeError::PiHubVersionIncompatible {
+                version,
+                required_version,
+            } => format!(
+                "Pi Hub 版本 {version} 不满足要求（需 {required_version}），请升级 Pi Hub。"
+            ),
+            LocalRuntimeError::DoctorInvalidOutput(_) => {
+                "Pi Hub 环境检查输出无法解析，请确认 Pi Hub 版本与协议兼容。".to_string()
+            }
+            LocalRuntimeError::DoctorBlocked(_) => {
+                "存在阻断性问题，无法启动本机 Pi Hub。请先查看环境检查结果。".to_string()
+            }
+            LocalRuntimeError::PiAgentDirUnavailable(_) => {
+                "Pi Agent 数据目录不可用或无法创建，请检查路径与权限。".to_string()
+            }
+            LocalRuntimeError::PiSessionDirUnavailable(_) => {
+                "Pi Session 目录不可用，请检查路径与权限。".to_string()
+            }
+            LocalRuntimeError::PiAuthNotConfigured => {
+                "尚未配置任何 Provider 认证，Agent 任务可能无法完成。".to_string()
+            }
+            LocalRuntimeError::PiModelNotAvailable => {
+                "未找到可用模型，请检查模型配置。".to_string()
+            }
+            LocalRuntimeError::PortConflict { port } => {
+                format!("本地端口 {port} 已被占用，且该服务不是 Pi Hub。请在设置中更换端口。")
+            }
+            LocalRuntimeError::ServiceProbeTimeout => "探测本机服务超时，请稍后重试。".to_string(),
+            LocalRuntimeError::ServiceProtocolIncompatible { got, min, max } => {
+                format!("本机服务协议版本 {got} 与本客户端（支持 {min}-{max}）不兼容。")
+            }
+            LocalRuntimeError::ProcessStartFailed(_) => "启动本机 Pi Hub 进程失败。".to_string(),
+            LocalRuntimeError::ProcessExitedEarly { exit_code } => {
+                format!("本机 Pi Hub 进程提前退出（退出码 {exit_code:?}）。",)
+            }
+            LocalRuntimeError::ProcessNotOwned => {
+                "该 Pi Hub 由其他程序启动，本客户端无权停止。".to_string()
+            }
+            LocalRuntimeError::ProcessStopTimeout => {
+                "本机 Pi Hub 未在限定时间内退出，已强制终止。".to_string()
+            }
+            LocalRuntimeError::PortNotReleased { port } => {
+                format!("停止后本地端口 {port} 仍未释放，请检查是否有残留进程。")
+            }
+            LocalRuntimeError::AutoStartSuppressed => {
+                "自动启动因多次失败被暂时抑制，请手动启动或调整设置。".to_string()
+            }
+            LocalRuntimeError::Cancelled => "本机 Pi Hub 操作已取消。".to_string(),
+            LocalRuntimeError::Internal(_) => "本机运行时发生内部错误。".to_string(),
+        }
+    }
+
+    /// Build a serializable DTO, attaching allowlisted non-sensitive details.
+    /// Only keys in the design-v2 §18 allowlist are ever inserted.
+    pub fn to_dto_with_details(&self) -> ErrorDto {
+        let mut dto = AppError::LocalRuntime(self.clone()).to_dto();
+        let mut details = BTreeMap::new();
+        match self {
+            LocalRuntimeError::NodeVersionIncompatible {
+                version,
+                required_version,
+            } => {
+                details.insert("version".into(), version.clone());
+                details.insert("requiredVersion".into(), required_version.clone());
+            }
+            LocalRuntimeError::PiHubVersionIncompatible {
+                version,
+                required_version,
+            } => {
+                details.insert("version".into(), version.clone());
+                details.insert("requiredVersion".into(), required_version.clone());
+            }
+            LocalRuntimeError::PortConflict { port }
+            | LocalRuntimeError::PortNotReleased { port } => {
+                details.insert("port".into(), port.to_string());
+            }
+            LocalRuntimeError::ServiceProtocolIncompatible { got, min, max } => {
+                details.insert("got".into(), got.to_string());
+                details.insert("min".into(), min.to_string());
+                details.insert("max".into(), max.to_string());
+            }
+            LocalRuntimeError::ProcessExitedEarly { exit_code: Some(c) } => {
+                details.insert("exitCode".into(), c.to_string());
+            }
+            LocalRuntimeError::ProcessExitedEarly { exit_code: None } => {}
+            _ => {}
+        }
+        dto.details = details;
+        dto
     }
 }
 

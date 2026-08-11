@@ -12,11 +12,23 @@ const invokeMock =
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (command: string, args?: unknown) => invokeMock(command, args),
 }));
+// The home route now subscribes to V2 status events; stub `listen` so the
+// LocalRuntimeCard mount does not reach Tauri internals in unit tests.
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: () => Promise.resolve(vi.fn()),
+}));
 
 describe("App", () => {
   beforeEach(() => {
     invokeMock.mockReset();
-    invokeMock.mockResolvedValue([]);
+    // V1-focused tests: keep the V2 local-runtime card hidden so the empty
+    // service state renders unchanged.
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "get_local_runtime_platform_support") {
+        return Promise.resolve(false);
+      }
+      return Promise.resolve([]);
+    });
   });
 
   it("renders the trusted app shell header over the home route", async () => {

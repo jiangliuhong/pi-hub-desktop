@@ -19,6 +19,7 @@ pub mod connection;
 pub mod credential;
 pub mod error;
 pub mod event;
+pub mod local_runtime;
 pub mod platform;
 pub mod profile;
 pub mod ssh;
@@ -26,9 +27,12 @@ pub mod viewer;
 
 use crate::connection::manager::ConnectionManager;
 use crate::credential::{default_store, CredentialStore};
+use crate::local_runtime::manager::{LocalRuntimeManager, TauriBroadcaster};
+use crate::local_runtime::settings::LocalRuntimeSettingsStore;
 use crate::profile::repository::ProfileStore;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tauri::Manager;
 
 /// Product display name shared with the frontend / about surface.
 pub const APP_NAME: &str = "Pi Hub Client";
@@ -68,6 +72,15 @@ fn dirs_config_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
         .map(|d| d.join(APP_BUNDLE_ID))
+}
+
+/// Locate the on-disk local-runtime settings file (design-v2 §7).
+pub fn resolve_local_runtime_store_path() -> PathBuf {
+    if let Some(dir) = dirs_config_dir() {
+        let _ = std::fs::create_dir_all(&dir);
+        return dir.join("local-runtime.json");
+    }
+    PathBuf::from("local-runtime.json")
 }
 
 /// Build the managed state graph (profile store + credential store +
@@ -123,11 +136,49 @@ pub fn run() {
     }
     .expect("failed to load profile store");
 
-    tauri::Builder::default()
+    let credential_store = state.credentials.clone();
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(state.profile_store)
         .manage(state.credentials)
         .manage(state.manager)
+        .setup(move |app| {
+            // Build the V2 local runtime manager with a Tauri-backed
+            // broadcaster (design-v2 §16, §17.2). Construction in `setup`
+            // gives us the AppHandle needed for event emission.
+            let handle = app.handle().clone();
+            let local_settings = std::sync::Arc::new(LocalRuntimeSettingsStore::new(
+                resolve_local_runtime_store_path(),
+            ));
+            // Load settings best-effort (defaults are usable on failure).
+            let local_settings_load = local_settings.clone();
+            let runtime = tokio::runtime::Handle::current();
+            runtime.block_on(async move {
+                let _ = local_settings_load.load().await;
+            });
+            let credentials = credential_store.clone();
+            let manager = Arc::new(LocalRuntimeManager::platform_default(
+                local_settings,
+                credentials,
+                Arc::new(TauriBroadcaster::new(handle)),
+            ));
+            app.manage(manager.clone());
+            // Async app-launch init: scan + optional auto-start (design-v2 §14.1).
+            manager.spawn_initialize();
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            // design-v2 §16.1: on macOS the window-close path should NOT stop
+            // the managed process (the app may still run in the dock). True
+            // app exit is handled in the `ExitRequested` run-event below.
+            // The Service WebView's own window close is also handled here so it
+            // never accidentally tears down managed state.
+            if let tauri::WindowEvent::Destroyed = event {
+                // No-op for V2; kept as the hook point for future window
+                // bookkeeping.
+                let _ = window.label();
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             commands::profiles::list_services,
             commands::profiles::get_service,
@@ -143,9 +194,47 @@ pub fn run() {
             commands::connections::replace_known_host_and_connect,
             commands::viewer::open_service_view,
             commands::viewer::close_service_view,
+            commands::local_runtime::get_local_runtime_status,
+            commands::local_runtime::get_local_runtime_platform_support,
+            commands::local_runtime::scan_local_installations,
+            commands::local_runtime::validate_local_installation,
+            commands::local_runtime::run_local_environment_doctor,
+            commands::local_runtime::start_local_pi_hub,
+            commands::local_runtime::stop_local_pi_hub,
+            commands::local_runtime::restart_local_pi_hub,
+            commands::local_runtime::get_local_runtime_settings,
+            commands::local_runtime::update_local_runtime_settings,
+            commands::local_runtime::get_local_runtime_logs,
+            commands::local_runtime::clear_local_runtime_logs,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Pi Hub Client");
+        .build(tauri::generate_context!())
+        .expect("error while building Pi Hub Client");
+
+    // design-v2 §14.3: on true app exit, stop the managed Pi Hub if the setting
+    // is enabled. We block on a bounded, dedicated current-thread runtime so a
+    // graceful SIGTERM (then SIGKILL) can complete before the process exits,
+    // without depending on the app's runtime being multi-threaded. External
+    // processes are never touched. Window-close while the app keeps running is
+    // intentionally NOT handled here.
+    app.run(|app_handle, event| {
+        if let tauri::RunEvent::ExitRequested { .. } = event {
+            if let Some(manager) = app_handle.try_state::<Arc<LocalRuntimeManager>>() {
+                let manager = manager.inner().clone();
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build();
+                if let Ok(rt) = rt {
+                    rt.block_on(async move {
+                        let _ = tokio::time::timeout(
+                            std::time::Duration::from_secs(8),
+                            manager.on_app_exit(),
+                        )
+                        .await;
+                    });
+                }
+            }
+        }
+    });
 }
 
 #[cfg(test)]
