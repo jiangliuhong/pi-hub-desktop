@@ -398,7 +398,7 @@ pub(crate) fn parse_node_version(stdout: &str) -> Option<semver::Version> {
 }
 
 /// Whether a Node version satisfies the Pi Hub baseline (requirements-v2 §8.2).
-fn node_satisfies_baseline(v: &semver::Version) -> bool {
+pub(crate) fn node_satisfies_baseline(v: &semver::Version) -> bool {
     if v.major != NODE_REQUIRED_MAJOR {
         return v.major > NODE_REQUIRED_MAJOR;
     }

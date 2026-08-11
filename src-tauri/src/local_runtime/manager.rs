@@ -99,11 +99,24 @@ pub struct LocalRuntimeManager {
     generation: AtomicU64,
     services: Option<Arc<Services>>,
     broadcaster: Arc<dyn StatusBroadcaster>,
+    /// Ready-detection deadline (design-v2 §12.1). Injectable so tests can
+    /// exercise the startup-timeout path without waiting 30s (NFR-003).
+    start_timeout: Duration,
 }
 
 impl LocalRuntimeManager {
     /// Construct with explicit services (DI for tests / macOS production).
     pub fn new(services: Option<Services>, broadcaster: Arc<dyn StatusBroadcaster>) -> Self {
+        Self::with_start_timeout(services, broadcaster, START_TIMEOUT)
+    }
+
+    /// Construct with a custom ready-detection deadline. Exposed so the
+    /// startup-timeout path can be tested quickly (NFR-003).
+    pub(crate) fn with_start_timeout(
+        services: Option<Services>,
+        broadcaster: Arc<dyn StatusBroadcaster>,
+        start_timeout: Duration,
+    ) -> Self {
         LocalRuntimeManager {
             snapshot: RwLock::new(LocalRuntimeSnapshot::default()),
             process: Mutex::new(None),
@@ -111,6 +124,7 @@ impl LocalRuntimeManager {
             generation: AtomicU64::new(0),
             services: services.map(Arc::new),
             broadcaster,
+            start_timeout,
         }
     }
 
@@ -417,6 +431,7 @@ impl LocalRuntimeManager {
                         s.runtime_state = LocalRuntimeState::RunningExternal;
                     })
                     .await;
+                self.broadcast(&snap).await;
                 return Ok(snap);
             }
             ProbeResult::OtherService => {
@@ -456,13 +471,12 @@ impl LocalRuntimeManager {
 
         // 5. Launch.
         svc.logs.clear();
+        // We hold the op_lock and have confirmed the port is free + the
+        // installation is verified, so this transition is ours to make; set it
+        // directly rather than via the state-machine guard (which would no-op
+        // on e.g. Unknown and leave the UI showing a stale state).
         self.patch_snapshot(|s| {
-            if s.runtime_state
-                .transition(LocalRuntimeState::Starting)
-                .is_ok()
-            {
-                s.runtime_state = LocalRuntimeState::Starting;
-            }
+            s.runtime_state = LocalRuntimeState::Starting;
         })
         .await;
         let spec = StartSpec {
@@ -762,7 +776,7 @@ impl LocalRuntimeManager {
             return ReadyOutcome::Timeout;
         };
         let mut delay = READY_POLL_INITIAL;
-        let deadline = tokio::time::Instant::now() + START_TIMEOUT;
+        let deadline = tokio::time::Instant::now() + self.start_timeout;
         loop {
             if tokio::time::Instant::now() >= deadline {
                 return ReadyOutcome::Timeout;
@@ -1027,6 +1041,9 @@ pub mod test_support {
     pub struct FakeSupervisor {
         pub starts: Arc<std::sync::atomic::AtomicU32>,
         pub stops: Arc<std::sync::atomic::AtomicU32>,
+        /// When true, the spawned child exits immediately (exercises the
+        /// early-exit path in `wait_for_ready`).
+        pub exit_fast: bool,
     }
     impl Default for FakeSupervisor {
         fn default() -> Self {
@@ -1038,6 +1055,13 @@ pub mod test_support {
             FakeSupervisor {
                 starts: Arc::new(std::sync::atomic::AtomicU32::new(0)),
                 stops: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+                exit_fast: false,
+            }
+        }
+        pub fn new_exiting() -> Self {
+            FakeSupervisor {
+                exit_fast: true,
+                ..FakeSupervisor::new()
             }
         }
     }
@@ -1053,7 +1077,7 @@ pub mod test_support {
             #[cfg(unix)]
             {
                 let mut cmd = tokio::process::Command::new("sleep");
-                cmd.arg("60");
+                cmd.arg(if self.exit_fast { "0" } else { "60" });
                 cmd.process_group(0);
                 cmd.stdin(std::process::Stdio::null());
                 cmd.stdout(std::process::Stdio::null());
@@ -1187,6 +1211,33 @@ mod tests {
             credentials: Arc::new(InMemoryCredentialStore::new()),
         };
         LocalRuntimeManager::new(Some(services), Arc::new(NoopBroadcaster))
+    }
+
+    /// Like `manager_with_detector` but with a custom start deadline (for the
+    /// startup-timeout path).
+    fn manager_with_start_timeout(
+        probe: Arc<dyn LocalServiceProbe>,
+        doctor: Arc<dyn PiEnvironmentDoctor>,
+        supervisor: Arc<FakeSupervisor>,
+        start_timeout: Duration,
+    ) -> LocalRuntimeManager {
+        let settings = Arc::new(LocalRuntimeSettingsStore::in_memory());
+        let services = Services {
+            detector: Arc::new(FakeDetector {
+                set: InstallationSet::default(),
+            }),
+            doctor,
+            probe,
+            supervisor,
+            settings,
+            logs: Arc::new(RuntimeLogBuffer::default()),
+            credentials: Arc::new(InMemoryCredentialStore::new()),
+        };
+        LocalRuntimeManager::with_start_timeout(
+            Some(services),
+            Arc::new(NoopBroadcaster),
+            start_timeout,
+        )
     }
 
     fn probe(initial: ProbeResult) -> FakeProbe {
@@ -1469,6 +1520,84 @@ mod tests {
             supervisor.stops.load(std::sync::atomic::Ordering::Relaxed),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn start_reports_exited_early_when_child_dies() {
+        // The child (`sleep 0`) exits immediately; the probe never reports
+        // ready, so wait_for_ready must detect the dead handle and report
+        // ProcessExitedEarly, then tear it down.
+        let supervisor = Arc::new(FakeSupervisor::new_exiting());
+        let mgr = manager_with_supervisor(
+            Arc::new(probe(ProbeResult::NotListening)),
+            Arc::new(FakeDoctor {
+                report: ready_report(),
+            }),
+            supervisor.clone(),
+        );
+        persist_fake_installation(&mgr).await;
+
+        let res = mgr.start().await;
+        assert!(matches!(
+            res,
+            Err(LocalRuntimeError::ProcessExitedEarly { .. })
+        ));
+        let snap = mgr.snapshot().await;
+        assert_eq!(snap.runtime_state, LocalRuntimeState::Failed);
+        assert!(snap.managed_process.is_none());
+    }
+
+    #[tokio::test]
+    async fn start_reports_port_hijacked_during_poll() {
+        // Port is free at the initial check but reads as a non-Pi-Hub service
+        // while polling for ready → PortConflict + teardown.
+        let supervisor = Arc::new(FakeSupervisor::new());
+        let p = paired_probe(
+            &supervisor,
+            ProbeResult::NotListening,
+            ProbeResult::OtherService,
+        );
+        let mgr = manager_with_supervisor(
+            Arc::new(p),
+            Arc::new(FakeDoctor {
+                report: ready_report(),
+            }),
+            supervisor.clone(),
+        );
+        persist_fake_installation(&mgr).await;
+
+        let res = mgr.start().await;
+        assert!(matches!(res, Err(LocalRuntimeError::PortConflict { .. })));
+        // The hijacked managed process was torn down.
+        assert_eq!(
+            supervisor.stops.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn start_reports_timeout_when_never_becomes_ready() {
+        // Port never comes up and the child stays alive → bounded timeout fires.
+        let supervisor = Arc::new(FakeSupervisor::new());
+        let p = paired_probe(
+            &supervisor,
+            ProbeResult::NotListening,
+            ProbeResult::NotListening,
+        );
+        let mgr = manager_with_start_timeout(
+            Arc::new(p),
+            Arc::new(FakeDoctor {
+                report: ready_report(),
+            }),
+            supervisor.clone(),
+            Duration::from_millis(150),
+        );
+        persist_fake_installation(&mgr).await;
+
+        let res = mgr.start().await;
+        assert!(matches!(res, Err(LocalRuntimeError::ProcessStartFailed(_))));
+        let snap = mgr.snapshot().await;
+        assert_eq!(snap.runtime_state, LocalRuntimeState::Failed);
     }
 
     #[tokio::test]

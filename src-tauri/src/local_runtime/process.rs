@@ -132,10 +132,23 @@ impl ProcessSupervisor for TokioProcessSupervisor {
             cmd.env("PI_CODING_AGENT_DIR", agent_dir);
         }
         if let Some(secret) = &spec.pi_hub_password {
-            cmd.env(
-                "PI_HUB_PASSWORD",
-                std::str::from_utf8(secret.as_bytes()).unwrap_or(""),
-            );
+            // Inject the raw bytes as the env value. On Unix this avoids any
+            // UTF-8 round-trip that could silently turn a non-UTF-8 password
+            // into "" (and thus start with no auth).
+            #[cfg(unix)]
+            {
+                use std::os::unix::ffi::OsStrExt;
+                cmd.env(
+                    "PI_HUB_PASSWORD",
+                    std::ffi::OsStr::from_bytes(secret.as_bytes()),
+                );
+            }
+            #[cfg(not(unix))]
+            {
+                if let Ok(s) = std::str::from_utf8(secret.as_bytes()) {
+                    cmd.env("PI_HUB_PASSWORD", s);
+                }
+            }
         }
 
         cmd.process_group(0);

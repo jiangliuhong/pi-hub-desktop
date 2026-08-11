@@ -168,15 +168,17 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // design-v2 §16.1: on macOS the window-close path should NOT stop
-            // the managed process (the app may still run in the dock). True
-            // app exit is handled in the `ExitRequested` run-event below.
-            // The Service WebView's own window close is also handled here so it
-            // never accidentally tears down managed state.
-            if let tauri::WindowEvent::Destroyed = event {
-                // No-op for V2; kept as the hook point for future window
-                // bookkeeping.
-                let _ = window.label();
+            // V2-FR-016: refresh observable local-runtime state when the app
+            // regains focus (cheap, server-driven; never optimistic local
+            // state). Window-close is intentionally NOT handled here — true
+            // app exit stops the managed process via `ExitRequested` below.
+            if let tauri::WindowEvent::Focused(true) = event {
+                if let Some(manager) = window.app_handle().try_state::<Arc<LocalRuntimeManager>>() {
+                    let manager = manager.inner().clone();
+                    tokio::spawn(async move {
+                        let _ = manager.refresh().await;
+                    });
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![

@@ -61,7 +61,7 @@ impl PiEnvironmentDoctor for DefaultPiEnvironmentDoctor {
         let mut checks = Vec::new();
 
         // --- Desktop-owned checks ---
-        checks.push(check_node(ctx).await);
+        checks.push(self.check_node(ctx).await);
         checks.push(check_pi_hub_path(ctx));
         checks.push(check_agent_dir(ctx));
 
@@ -119,65 +119,91 @@ impl DefaultPiEnvironmentDoctor {
             }],
         }
     }
-}
 
-// ---- Desktop-owned checks ----
+    // ---- Desktop-owned checks ----
 
-async fn check_node(ctx: &DoctorContext) -> CheckResult {
-    let id = "DEP-NODE-001";
-    if !ctx.node_executable.exists() {
-        return fail(
-            id,
-            CheckCategory::Runtime,
-            CheckSeverity::Required,
-            "node_missing",
-            "未找到 Node.js 可执行文件。",
-            "请在设置中选择有效的 Node.js 安装路径。",
-        );
-    }
-    // Re-probe the version via the runner (kept cheap, short timeout).
-    let runner = crate::local_runtime::detector::TokioCommandRunner;
-    let out = runner
-        .run(
-            &ctx.node_executable,
-            &["--version"],
-            None,
-            Duration::from_secs(8),
-            &[],
-        )
-        .await;
-    match out {
-        Ok(o) if matches!(o.exit_code, Some(0)) => {
-            if let Some(v) = crate::local_runtime::detector::parse_node_version(&o.stdout) {
-                let mut details = BTreeMap::new();
-                details.insert("version".into(), serde_json::Value::String(v.to_string()));
-                pass(
-                    id,
-                    CheckCategory::Runtime,
-                    CheckSeverity::Required,
-                    "node_available",
-                    format!("Node.js {} 可用。", v),
-                    Some(details),
-                )
-            } else {
-                fail(
-                    id,
-                    CheckCategory::Runtime,
-                    CheckSeverity::Required,
-                    "node_version_unreadable",
-                    "无法读取 Node.js 版本。",
-                    "请检查 Node.js 安装是否完整。",
-                )
-            }
+    async fn check_node(&self, ctx: &DoctorContext) -> CheckResult {
+        let id = "DEP-NODE-001";
+        if !ctx.node_executable.exists() {
+            return fail(
+                id,
+                CheckCategory::Runtime,
+                CheckSeverity::Required,
+                "node_missing",
+                "未找到 Node.js 可执行文件。",
+                "请在设置中选择有效的 Node.js 安装路径。",
+            );
         }
-        _ => fail(
-            id,
-            CheckCategory::Runtime,
-            CheckSeverity::Required,
-            "node_execution_failed",
-            "执行 Node.js 失败。",
-            "请在设置中选择有效的 Node.js 安装路径。",
-        ),
+        // Probe the version via the *injected* runner (so tests can fake it).
+        let out = self
+            .runner
+            .run(
+                &ctx.node_executable,
+                &["--version"],
+                None,
+                Duration::from_secs(8),
+                &[],
+            )
+            .await;
+        match out {
+            Ok(o) if matches!(o.exit_code, Some(0)) => {
+                if let Some(v) = crate::local_runtime::detector::parse_node_version(&o.stdout) {
+                    // DEP-NODE-001: enforce the Pi Hub Node baseline (requirements-v2
+                    // §8.2). An incompatible Node is a *required* failure, not just a
+                    // warning, so it blocks start.
+                    if !crate::local_runtime::detector::node_satisfies_baseline(&v) {
+                        let mut details = BTreeMap::new();
+                        details.insert("version".into(), serde_json::Value::String(v.to_string()));
+                        details.insert(
+                            "requiredVersion".into(),
+                            serde_json::Value::String(format!(
+                                ">={}.{}.{}",
+                                crate::local_runtime::model::NODE_REQUIRED_MAJOR,
+                                crate::local_runtime::model::NODE_REQUIRED_MINOR,
+                                crate::local_runtime::model::NODE_REQUIRED_PATCH,
+                            )),
+                        );
+                        return CheckResult {
+                            id: id.into(),
+                            category: CheckCategory::Runtime,
+                            severity: CheckSeverity::Required,
+                            status: CheckStatus::Fail,
+                            code: Some("node_version_incompatible".into()),
+                            message: Some(format!("Node.js {} 不满足要求。", v)),
+                            remediation: Some("请升级 Node.js 到要求的最低版本。".into()),
+                            details,
+                        };
+                    }
+                    let mut details = BTreeMap::new();
+                    details.insert("version".into(), serde_json::Value::String(v.to_string()));
+                    pass(
+                        id,
+                        CheckCategory::Runtime,
+                        CheckSeverity::Required,
+                        "node_available",
+                        format!("Node.js {} 可用。", v),
+                        Some(details),
+                    )
+                } else {
+                    fail(
+                        id,
+                        CheckCategory::Runtime,
+                        CheckSeverity::Required,
+                        "node_version_unreadable",
+                        "无法读取 Node.js 版本。",
+                        "请检查 Node.js 安装是否完整。",
+                    )
+                }
+            }
+            _ => fail(
+                id,
+                CheckCategory::Runtime,
+                CheckSeverity::Required,
+                "node_execution_failed",
+                "执行 Node.js 失败。",
+                "请在设置中选择有效的 Node.js 安装路径。",
+            ),
+        }
     }
 }
 
@@ -559,6 +585,77 @@ fn pass(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::local_runtime::detector::{CommandOutput, CommandRunner};
+    use crate::local_runtime::settings::LocalRuntimeSettings;
+    use async_trait::async_trait;
+    use std::sync::Mutex;
+
+    /// A runner fake returning a canned stdout for any invocation.
+    struct FakeRunner(Mutex<CommandOutput>);
+    impl FakeRunner {
+        fn new(stdout: &str) -> Self {
+            FakeRunner(Mutex::new(CommandOutput {
+                exit_code: Some(0),
+                stdout: stdout.into(),
+                stderr: String::new(),
+            }))
+        }
+    }
+    #[async_trait]
+    impl CommandRunner for FakeRunner {
+        async fn run(
+            &self,
+            _program: &std::path::Path,
+            _args: &[&str],
+            _cwd: Option<&std::path::Path>,
+            _timeout: Duration,
+            _extra_env: &[(&str, &str)],
+        ) -> Result<CommandOutput, LocalRuntimeError> {
+            Ok(self.0.lock().unwrap().clone())
+        }
+    }
+
+    fn doctor_with(stdout: &str) -> DefaultPiEnvironmentDoctor {
+        DefaultPiEnvironmentDoctor::new(std::sync::Arc::new(FakeRunner::new(stdout)))
+    }
+
+    fn ctx_with_node(node: &std::path::Path) -> DoctorContext {
+        DoctorContext {
+            node_executable: node.to_path_buf(),
+            pi_hub_entrypoint: std::path::PathBuf::from("/nonexistent/pi-hub.js"),
+            pi_hub_package_root: std::path::PathBuf::from("/nonexistent/pkg"),
+            settings: LocalRuntimeSettings::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn check_node_passes_for_compatible_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = dir.path().join("node");
+        std::fs::write(&node, "x").unwrap();
+        let doctor = doctor_with("v24.19.0\n");
+        let result = doctor.check_node(&ctx_with_node(&node)).await;
+        assert_eq!(result.status, CheckStatus::Pass);
+        assert_eq!(result.code.as_deref(), Some("node_available"));
+    }
+
+    #[tokio::test]
+    async fn check_node_blocks_incompatible_version() {
+        // M2: a Node below the baseline must be a *required* failure, blocking
+        // start (DEP-NODE-001).
+        let dir = tempfile::tempdir().unwrap();
+        let node = dir.path().join("node");
+        std::fs::write(&node, "x").unwrap();
+        let doctor = doctor_with("v18.0.0\n");
+        let result = doctor.check_node(&ctx_with_node(&node)).await;
+        assert_eq!(result.severity, CheckSeverity::Required);
+        assert_eq!(result.status, CheckStatus::Fail);
+        assert_eq!(result.code.as_deref(), Some("node_version_incompatible"));
+        assert_eq!(
+            result.details.get("version").and_then(|v| v.as_str()),
+            Some("18.0.0")
+        );
+    }
 
     #[test]
     fn aggregate_blocked_on_required_fail() {
