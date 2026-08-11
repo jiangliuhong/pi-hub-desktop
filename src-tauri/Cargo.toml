@@ -5,13 +5,6 @@ description = "Pi Hub Client — macOS / iOS client for Pi Hub"
 authors = ["jiangliuhong"]
 edition = "2021"
 
-# Dependencies are added deliberately per V1 phase. The set below is the
-# minimum needed for the initialization skeleton to compile and run. SSH
-# (`russh`), Keychain (`security-framework`), the store plugin and the data
-# model crates (`tokio`, `uuid`, `chrono`, `url`, `async-trait`, `thiserror`,
-# `tracing`) are introduced together with the code that actually uses them,
-# per AGENTS.md §3 (justify every new dependency).
-
 [lib]
 # The `_lib` suffix avoids a name clash between the lib and bin crate on Windows.
 name = "pi_hub_client_lib"
@@ -21,7 +14,58 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+# --- Tauri runtime (core requirement, §3 tech stack) ---
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
+
+# --- Serialization across the Tauri boundary (§11 data model) ---
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# --- Async runtime + cancellation (§5.3 lifecycle, §8 forward) ---
+# Justification: SSH session, forward accept loop and keepalive are inherently
+# async and need cooperative cancellation. The std library has no async runtime.
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "io-util",
+    "sync",
+    "time",
+    "fs",
+] }
+tokio-util = { version = "0.7", features = ["rt"] } # CancellationToken
+
+# --- Domain primitives ---
+# Justification: §11 requires stable UUID service ids; timestamps for
+# created_at/updated_at; typed URLs for base_url; async trait objects for the
+# provider/credential abstractions; structured typed errors (§19); structured
+# redacted logging (§20). None of these are provided by std.
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+url = { version = "2", features = ["serde"] }
+async-trait = "0.1"
+thiserror = "2"
+tracing = { version = "0.1", features = ["attributes"] }
+
+# --- SSH client + direct-tcpip (§7 SSH rules) ---
+# Justification: §3 mandates `russh` for the SSH client and `direct-tcpip`.
+# russh is a pure-Rust async SSH implementation; it builds and tests on Linux
+# (used for the integration test suite in §12.2) and supports the Apple targets.
+russh = "0.51"
+# russh now ships its own key handling (`russh::keys`); used for Ed25519/RSA
+# private-key decoding and host-key public-key serialization.
+
+# --- Host-key fingerprint + base64 wire encoding (§6.3, §9) ---
+# Justification: §9 requires SHA-256 fingerprints and OpenSSH wire-format
+# serialization for known-host comparison. Pulled explicitly rather than
+# reaching into russh internals.
+sha2 = "0.10"
+base64 = "0.22"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util", "rt-multi-thread", "macros"] }
+tempfile = "3"
+# Used only in tests to generate throwaway Ed25519 keys for fingerprint /
+# comparison assertions; never used with real user keys.
+rand = "0.8"

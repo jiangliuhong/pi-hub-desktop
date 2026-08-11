@@ -54,27 +54,41 @@ Service WebView ────────────────→ Existing Pi 
 
 ## 当前状态
 
-> 阶段：**项目初始化完成**（V1 Phase 1 的第一步）。尚未进入需求开发。
+> 阶段：**V1 领域核心已实现**（Phase 1 / Phase 2 的连接、状态机、Profile、凭据、SSH Forward、Host Key、前端表单与连接流程）。SSH Forward 通过 Linux 上的真 SSH Server 集成测试验证；Apple Keychain 与 Service View 仍需真机验收。
 
-已完成：
+### 已实现并验证（Linux 可运行部分）
 
-- Tauri 2 工程骨架（React + TypeScript strict + Vite），同一仓支持 macOS / iOS。
-- 目录结构对齐 `docs/design-v1.md §5`（前端 `app/features/components/lib/types`，Rust `commands/connection/credential/profile/ssh/viewer/platform/error/event`）。
-- Trusted App Shell 路由与占位页（服务列表、表单、连接、Viewer）。
-- 前端工具链：Prettier、ESLint（flat config，type-checked）、Vitest + Testing Library。
-- Rust 骨架：Tauri builder、模块边界、最小单测；`tauri.conf.json` 设置最低系统版本（macOS 14 / iOS 17）。
-- Capability 仅绑定可信 `main` 窗口，远端 Service WebView 不匹配任何 capability（`AGENTS.md §6.4`）。
-- 应用图标占位、`package-lock.json`、`src-tauri/Cargo.lock`、`rust-toolchain.toml`、`.nvmrc`。
+- **错误模型**：`AppError` 类型枚举 + 稳定错误码 DTO，`details` 仅携带白名单非敏感字段，秘密永不出现在 DTO / 日志（`src-tauri/src/error.rs`，单测覆盖脱敏）。
+- **服务配置**：`ServiceProfile` tagged enum（`direct_url` / `ssh_forward`）、原子版本化 Store（JSON 文件 + temp+rename）、向前迁移、服务 CRUD、凭据引用计数与孤儿清理（`profile/`，单测 + 临时文件持久化测试）。
+- **凭据抽象**：`CredentialStore` trait + 纯内存实现（测试用）+ Apple Keychain 实现（`cfg(target_vendor = "apple")` 门控，结构完整）。Secret 在 Drop 时尽力清零。
+- **连接状态机**：明确枚举与合法转换，非法转换在测试中报错（`connection/state.rs`）。
+- **ConnectionManager**：每服务去重、RAII + `CancellationToken` 资源管理、Host Key 确认往返、显式断开释放（`connection/manager.rs`，单测）。
+- **Provider 抽象**：`DirectUrlProvider` / `SshForwardProvider` 统一接口（UI 不接触 SSH，NFR-005）。
+- **SSH**：`russh` 连接 + 严格 Host Key 校验（未知/变更一律阻断，绝不 `StrictHostKeyChecking=no`）、Password / Ed25519 / RSA + Passphrase、`127.0.0.1:0` 随机 loopback Listener、每连接独立 `direct-tcpip` + 双向 `copy_bidirectional`、keepalive、取消。
+- **SSH 集成测试**（`src-tauri/tests/ssh_forward.rs`）：启动进程内真 `russh` server + mock Pi Hub，验证：未知 Host Key→确认→重连、错误密码拒绝、`direct-tcpip` 经隧道往返 HTTP、取消停走 accept loop。
+- **Tauri 命令**：profile / credential / connection / viewer 薄适配层，状态图注入。
+- **前端**：服务列表（FR-001）、条件字段表单 + 校验（FR-002/003）、Host Key 确认对话框（FR-007）、连接进度 + 诊断 + 重试（FR-009/016）、Viewer 受控工具栏。秘密仅在调用 Keychain 时短暂存在并立即清空。
 
-尚未实现（按 V1 Phase 1/2 落地）：服务数据模型与 Store、Keychain 抽象、SSH、连接状态机、Service View 集成，以及 Phase 0 的真机技术验证。
+### 检查状态（本 Linux 环境）
 
-正式开发前仍需完成的 Phase 0 技术验证：
+| 检查                                          | 状态                            |
+| --------------------------------------------- | ------------------------------- |
+| `npm run format:check` / `lint` / `typecheck` | ✅ 通过                         |
+| `npm test`                                    | ✅ 35 个前端测试通过            |
+| `npm run build`                               | ✅ Vite 构建成功                |
+| `cargo fmt --check`                           | ✅ 干净                         |
+| `cargo clippy --all-targets -- -D warnings`   | ✅ 干净                         |
+| `cargo test`                                  | ✅ 53 单测 + 4 SSH 集成测试通过 |
 
-1. Tauri 2 同仓构建 macOS 和 iOS。
-2. iPhone 真机运行 `russh` 并完成 Local Port Forward。
-3. 使用独立、零权限 Service WebView 加载 Pi Hub。
-4. 在 iOS/macOS 上读写 Apple Keychain。
-5. 验证 Pi Hub 流式输出、文件选择和前后台恢复。
+### 仍需真机验收（AGENTS.md §12.4 / §15，如实记录）
+
+- **Apple Keychain**：`apple_keychain.rs` 仅在 `target_vendor = "apple"` 编译，未在 macOS / iPhone 真机验证实际读写与 item 删除。
+- **Service WebView**：独立零权限 WKWebView / WebviewWindow 的创建、Basic Auth challenge、Cookie 按 service 隔离、文件选择 / 下载、外部链接交给系统浏览器——命令已记录意图，原生窗口创建需在 macOS / iPhone 验证。
+- **真机 SSH**：Password、Ed25519 Key、带 Passphrase Key 在 iPhone 真机的 `russh` 表现；iOS 前后台恢复。
+- **平台构建**：`npm run tauri build` 与 `npm run tauri ios build` 需 macOS / Xcode，本环境无法执行。
+- **HTTP Basic Auth**：Pi Hub 密码 Keychain 集成需真机验证（design §15 Spike D）。
+
+以上未验证项不声称已完成。
 
 ## 开发环境
 

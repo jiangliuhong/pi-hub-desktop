@@ -1,70 +1,158 @@
-import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
-import { listServices } from "./api";
+import { useCallback, useEffect, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
+import { deleteService, listServices } from "./api";
 import type { ServiceProfile } from "./model";
+import { connectionStateLabel } from "../connection/model";
 import { PagePlaceholder } from "../../components/PagePlaceholder";
+import type { AppErrorDto } from "../../lib/tauri";
 
 /**
- * Service list — the V1 home page (docs/requirements-v1.md §8.1).
+ * Service list — the V1 home page (docs/requirements-v1.md §8.1, FR-001).
  *
- * During initialization this renders the empty state and the "add service"
- * entry point. Listing, status and "last connection" display arrive in
- * Phase 1; the page must never fabricate an "Online" status (FR-001).
+ * Lists saved services with name, connection type and last status. Status is
+ * never fabricated as "Online"; default is "未连接" (FR-001). Delete is a
+ * destructive action requiring confirmation (FR-004).
  */
 export function ServiceListPage() {
   const [services, setServices] = useState<ServiceProfile[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<ServiceProfile | null>(
+    null,
+  );
+  const [deleting, setDeleting] = useState(false);
+  const navigate = useNavigate();
+
+  const reload = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      setServices(await listServices());
+    } catch (e) {
+      setError(toMessage(e));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
-    let cancelled = false;
-    const load = async () => {
-      try {
-        const result = await listServices();
-        if (!cancelled) setServices(result);
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    };
-    void load();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    void reload();
+  }, [reload]);
+
+  const confirmDelete = async () => {
+    if (!pendingDelete) return;
+    setDeleting(true);
+    try {
+      await deleteService(pendingDelete.metadata.id);
+      setPendingDelete(null);
+      await reload();
+    } catch (e) {
+      setError(toMessage(e));
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <PagePlaceholder title="加载服务列表…">
+        <p>正在读取本地服务配置。</p>
+      </PagePlaceholder>
+    );
+  }
+
+  if (services.length === 0) {
+    return (
+      <PagePlaceholder title="还没有 Pi Hub 服务">
+        <p>添加你的第一个 Pi Hub 服务以开始使用。</p>
+        <Link className="add-button" to="/services/new">
+          + 添加服务
+        </Link>
+      </PagePlaceholder>
+    );
+  }
 
   return (
     <div>
-      {loading ? (
-        <PagePlaceholder title="加载服务列表…">
-          <p>正在读取本地服务配置。</p>
-        </PagePlaceholder>
-      ) : services.length === 0 ? (
-        <PagePlaceholder title="还没有 Pi Hub 服务">
-          <p>添加你的第一个 Pi Hub 服务以开始使用。</p>
-          <Link className="add-button" to="/services/new">
-            + 添加服务
-          </Link>
-          <p className="phase-note">
-            服务列表、Direct URL 与 SSH Forward 的完整实现将在 V1 Phase 1 /
-            Phase 2 完成。
-          </p>
-        </PagePlaceholder>
-      ) : (
-        <ul className="service-list">
-          {services.map((service) => (
-            <li key={service.metadata.id}>
-              <Link to={`/connect/${service.metadata.id}`}>
-                <span className="name">{service.metadata.name}</span>
-              </Link>
+      {error ? (
+        <div role="alert" className="error-banner">
+          {error}
+        </div>
+      ) : null}
+      <ul className="service-list" aria-label="服务列表">
+        {services.map((service) => (
+          <li key={service.metadata.id}>
+            <Link
+              to={`/connect/${service.metadata.id}`}
+              className="service-row"
+            >
+              <span className="name">{service.metadata.name}</span>
               <span className="meta">
                 {service.connection_type === "direct_url"
                   ? "Direct URL"
                   : "SSH Forward"}{" "}
-                · 未连接
+                · {connectionStateLabel("idle")}
               </span>
-            </li>
-          ))}
-        </ul>
-      )}
+            </Link>
+            <div className="service-actions">
+              <button
+                type="button"
+                onClick={() => {
+                  void navigate(`/connect/${service.metadata.id}`);
+                }}
+              >
+                连接
+              </button>
+              <Link to={`/services/${service.metadata.id}/edit`}>编辑</Link>
+              <button
+                type="button"
+                className="danger"
+                onClick={() => setPendingDelete(service)}
+              >
+                删除
+              </button>
+            </div>
+          </li>
+        ))}
+      </ul>
+      <Link className="add-button" to="/services/new">
+        + 添加服务
+      </Link>
+
+      {pendingDelete ? (
+        <div className="modal-backdrop" role="dialog" aria-modal="true">
+          <div className="modal">
+            <h3>删除服务？</h3>
+            <p>
+              将删除「{pendingDelete.metadata.name}
+              」并断开其活动连接，同时清理不再被引用的凭据与 Host Key
+              记录。此操作不可撤销。
+            </p>
+            <div className="modal-actions">
+              <button
+                type="button"
+                disabled={deleting}
+                onClick={() => setPendingDelete(null)}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="danger"
+                disabled={deleting}
+                onClick={() => void confirmDelete()}
+              >
+                {deleting ? "删除中…" : "确认删除"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
+}
+
+function toMessage(e: unknown): string {
+  const dto = e as AppErrorDto | undefined;
+  return dto?.message ?? "发生未知错误。";
 }

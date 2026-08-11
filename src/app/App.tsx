@@ -16,7 +16,7 @@ export function App() {
         <div className="app-shell">
           <header className="app-header">
             <h1>Pi Hub Client</h1>
-            <span className="tag">V1 · 初始化阶段</span>
+            <span className="tag">V1 · 连接核心</span>
           </header>
           <main className="app-main">
             <AppRoutes />

@@ -47,7 +47,20 @@ export function validateDirectUrl(input: string): ValidationResult {
 }
 
 /**
- * Validate an SSH or target TCP port.
+ * Whether a Direct URL is a plaintext (HTTP) connection that needs the one-time
+ * safety warning (FR-005). Loopback HTTP is still plaintext but the warning is
+ * the same.
+ */
+export function isPlaintextDirectUrl(input: string): boolean {
+  try {
+    return new URL(input.trim()).protocol === "http:";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Validate an SSH or target TCP port (SR-007).
  *
  * Port 0 is rejected as an explicit port value; it is only valid for *local
  * listener* allocation, which is handled by the Rust side and never accepted
@@ -63,10 +76,38 @@ export function validatePort(input: number): ValidationResult {
   return { ok: true };
 }
 
-/** Validate an SSH username (non-empty after trim). */
+/** Validate an SSH username (non-empty after trim) (SR-007). */
 export function validateSshUsername(input: string): ValidationResult {
   if (input.trim().length === 0) {
     return { ok: false, reason: "SSH 用户名不能为空" };
+  }
+  return { ok: true };
+}
+
+/** Validate an SSH host (non-empty after trim) (SR-007). */
+export function validateHost(input: string): ValidationResult {
+  if (input.trim().length === 0) {
+    return { ok: false, reason: "主机不能为空" };
+  }
+  return { ok: true };
+}
+
+/** Validate a service display name (non-empty after trim). */
+export function validateName(input: string): ValidationResult {
+  if (input.trim().length === 0) {
+    return { ok: false, reason: "名称不能为空" };
+  }
+  return { ok: true };
+}
+
+/** Validate an OpenSSH private key PEM (basic shape check; full decode is Rust-side). */
+export function validatePrivateKeyPem(input: string): ValidationResult {
+  const value = input.trim();
+  if (value.length === 0) {
+    return { ok: false, reason: "私钥不能为空" };
+  }
+  if (!value.startsWith("-----BEGIN ") || !value.includes("PRIVATE KEY-----")) {
+    return { ok: false, reason: "私钥看起来不是 OpenSSH 格式" };
   }
   return { ok: true };
 }
