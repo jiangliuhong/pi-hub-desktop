@@ -88,5 +88,5 @@ jobs:
           prerelease: false
           generateReleaseNotes: true
           retryAttempts: 2
-          tauriScript: npm run tauri --
+          tauriScript: npm run tauri
           args: --target ${{ matrix.target }}
