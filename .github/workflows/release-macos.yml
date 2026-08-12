@@ -62,18 +62,39 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Build and upload macOS bundle
+      - name: Build and upload unsigned macOS bundle
+        if: github.ref_name == 'v0.1.3'
         uses: tauri-apps/tauri-action@v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # v0.1.2 is intentionally unsigned while the Apple certificate is
-          # repaired. Later releases continue to require signing/notarization.
-          APPLE_CERTIFICATE: ${{ github.ref_name != 'v0.1.2' && secrets.APPLE_CERTIFICATE || '' }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ github.ref_name != 'v0.1.2' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
-          APPLE_SIGNING_IDENTITY: ${{ github.ref_name != 'v0.1.2' && secrets.APPLE_SIGNING_IDENTITY || '' }}
-          APPLE_ID: ${{ github.ref_name != 'v0.1.2' && secrets.APPLE_ID || '' }}
-          APPLE_PASSWORD: ${{ github.ref_name != 'v0.1.2' && secrets.APPLE_PASSWORD || '' }}
-          APPLE_TEAM_ID: ${{ github.ref_name != 'v0.1.2' && secrets.APPLE_TEAM_ID || '' }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: Pi Hub Client ${{ github.ref_name }}
+          releaseBody: |
+            macOS builds for Pi Hub Client ${{ github.ref_name }}.
+
+            Download the DMG for your Mac:
+            - `aarch64` for Apple Silicon (M1/M2/M3/M4)
+            - `x86_64` for Intel
+          releaseCommitish: ${{ github.sha }}
+          releaseDraft: false
+          prerelease: false
+          generateReleaseNotes: true
+          retryAttempts: 2
+          tauriScript: npm run tauri
+          args: --target ${{ matrix.target }}
+
+      - name: Build, sign, and upload macOS bundle
+        if: github.ref_name != 'v0.1.3'
+        uses: tauri-apps/tauri-action@v0.6.2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: Pi Hub Client ${{ github.ref_name }}
