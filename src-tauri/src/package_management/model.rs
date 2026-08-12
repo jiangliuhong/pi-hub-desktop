@@ -423,7 +423,10 @@ impl Default for PackageManagementSnapshot {
                     latest_version: None,
                     last_update_check_at: None,
                     release_token: None,
-                    allowed_actions: Vec::new(),
+                    // The first scan/check must remain reachable before any
+                    // detection has populated the snapshot. These are safe,
+                    // read-only card-level actions.
+                    allowed_actions: vec![ProductAction::Scan, ProductAction::CheckUpdates],
                     issue: None,
                 })
                 .collect(),
@@ -575,5 +578,11 @@ mod tests {
         let snap = PackageManagementSnapshot::default();
         assert_eq!(snap.products.len(), 2);
         assert_eq!(snap.products[0].install_state, ProductInstallState::Unknown);
+        for product in snap.products {
+            assert_eq!(
+                product.allowed_actions,
+                vec![ProductAction::Scan, ProductAction::CheckUpdates]
+            );
+        }
     }
 }

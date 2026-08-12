@@ -38,8 +38,8 @@ const EMPTY: PackageManagementSnapshot = {
 };
 
 export interface PackageManagementActions {
-  scan: () => Promise<void>;
-  checkUpdates: (force?: boolean) => Promise<void>;
+  scan: (product: ProductId) => Promise<void>;
+  checkUpdates: (product: ProductId, force?: boolean) => Promise<void>;
   install: (product: ProductId) => Promise<void>;
   update: (product: ProductId) => Promise<void>;
   confirmRestart: (operationId: string) => Promise<void>;
@@ -53,6 +53,8 @@ export interface UsePackageManagement {
   loading: boolean;
   /** Last actionable error (cleared on the next successful action). */
   error: PackageErrorDto | null;
+  /** Product that triggered {@link error}, so the UI can surface it in-card. */
+  errorProduct: ProductId | null;
   actions: PackageManagementActions;
 }
 
@@ -65,6 +67,7 @@ export function usePackageManagement(): UsePackageManagement {
   const [snapshot, setSnapshot] = useState<PackageManagementSnapshot>(EMPTY);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<PackageErrorDto | null>(null);
+  const [errorProduct, setErrorProduct] = useState<ProductId | null>(null);
   /** Guard against overlapping async actions per product. */
   const pending = useRef<Set<string>>(new Set());
 
@@ -116,11 +119,16 @@ export function usePackageManagement(): UsePackageManagement {
   }, [supported]);
 
   const runWithGuard = useCallback(
-    async <T>(key: string, fn: () => Promise<T>): Promise<T | undefined> => {
+    async <T>(
+      key: string,
+      fn: () => Promise<T>,
+      product?: ProductId,
+    ): Promise<T | undefined> => {
       if (pending.current.has(key)) return undefined;
       pending.current.add(key);
       setLoading(true);
       setError(null);
+      setErrorProduct(null);
       try {
         const result = await fn();
         // Refresh the snapshot after any mutation.
@@ -129,6 +137,7 @@ export function usePackageManagement(): UsePackageManagement {
         return result;
       } catch (raw) {
         setError(toErrorDto(raw));
+        setErrorProduct(product ?? null);
         return undefined;
       } finally {
         pending.current.delete(key);
@@ -139,50 +148,70 @@ export function usePackageManagement(): UsePackageManagement {
   );
 
   const actions: PackageManagementActions = {
-    scan: () =>
-      runWithGuard("scan", () => scanManagedProducts()).then(() => undefined),
-    checkUpdates: (force = true) =>
-      runWithGuard("check", () => checkProductUpdates(force)).then(
-        () => undefined,
-      ),
+    scan: (product) =>
+      runWithGuard(
+        `scan:${product}`,
+        () => scanManagedProducts(product),
+        product,
+      ).then(() => undefined),
+    checkUpdates: (product, force = true) =>
+      runWithGuard(
+        `check:${product}`,
+        () => checkProductUpdates(product, force),
+        product,
+      ).then(() => undefined),
     install: (product) =>
-      runWithGuard(`install:${product}`, async () => {
-        const token = releaseTokenFor(snapshot, product);
-        if (!token) {
-          // Need a fresh check before install is actionable.
-          const snap = await checkProductUpdates(true);
-          const tok = releaseTokenFor(snap, product);
-          if (!tok) throw noTokenError(product);
-          return startProductInstall(product, tok);
-        }
-        return startProductInstall(product, token);
-      }).then(() => undefined),
+      runWithGuard(
+        `install:${product}`,
+        async () => {
+          const token = releaseTokenFor(snapshot, product);
+          if (!token) {
+            // Need a fresh check before install is actionable.
+            const snap = await checkProductUpdates(product, true);
+            const tok = releaseTokenFor(snap, product);
+            if (!tok) throw noTokenError(product);
+            return startProductInstall(product, tok);
+          }
+          return startProductInstall(product, token);
+        },
+        product,
+      ).then(() => undefined),
     update: (product) =>
-      runWithGuard(`update:${product}`, async () => {
-        const token = releaseTokenFor(snapshot, product);
-        if (!token) {
-          const snap = await checkProductUpdates(true);
-          const tok = releaseTokenFor(snap, product);
-          if (!tok) throw noTokenError(product);
-          return startProductUpdate(product, tok);
-        }
-        return startProductUpdate(product, token);
-      }).then(() => undefined),
+      runWithGuard(
+        `update:${product}`,
+        async () => {
+          const token = releaseTokenFor(snapshot, product);
+          if (!token) {
+            const snap = await checkProductUpdates(product, true);
+            const tok = releaseTokenFor(snap, product);
+            if (!tok) throw noTokenError(product);
+            return startProductUpdate(product, tok);
+          }
+          return startProductUpdate(product, token);
+        },
+        product,
+      ).then(() => undefined),
     confirmRestart: (operationId) =>
-      runWithGuard(`confirm:${operationId}`, () =>
-        confirmPiHubUpdateRestart(operationId),
+      runWithGuard(
+        `confirm:${operationId}`,
+        () => confirmPiHubUpdateRestart(operationId),
+        snapshot.active_operation?.product,
       ).then(() => undefined),
     cancel: (operationId) =>
-      runWithGuard(`cancel:${operationId}`, () =>
-        cancelPackageOperation(operationId),
+      runWithGuard(
+        `cancel:${operationId}`,
+        () => cancelPackageOperation(operationId),
+        snapshot.active_operation?.product,
       ).then(() => undefined),
     activate: (product) =>
-      runWithGuard(`activate:${product}`, () =>
-        activateManagedProduct(product),
+      runWithGuard(
+        `activate:${product}`,
+        () => activateManagedProduct(product),
+        product,
       ).then(() => undefined),
   };
 
-  return { supported, snapshot, loading, error, actions };
+  return { supported, snapshot, loading, error, errorProduct, actions };
 }
 
 function releaseTokenFor(

@@ -26,14 +26,20 @@ export function getPackageManagementStatus(): Promise<PackageManagementSnapshot>
   );
 }
 
-export function scanManagedProducts(): Promise<PackageManagementSnapshot> {
-  return callCommand<PackageManagementSnapshot>("scan_managed_products");
+export function scanManagedProducts(
+  product: ProductId,
+): Promise<PackageManagementSnapshot> {
+  return callCommand<PackageManagementSnapshot>("scan_managed_products", {
+    product,
+  });
 }
 
 export function checkProductUpdates(
+  product: ProductId,
   force = true,
 ): Promise<PackageManagementSnapshot> {
   return callCommand<PackageManagementSnapshot>("check_product_updates", {
+    product,
     force,
   });
 }

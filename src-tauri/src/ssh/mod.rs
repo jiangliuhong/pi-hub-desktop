@@ -5,6 +5,7 @@
 
 pub mod client;
 pub mod forward;
+pub(crate) mod health;
 pub mod host_key;
 pub mod key_loader;
 

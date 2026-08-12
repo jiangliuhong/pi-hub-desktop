@@ -11,9 +11,10 @@
 //!   replacement flow is a separate, doubly-confirmed path.
 
 use crate::error::{AppError, SshError};
+use crate::ssh::health::{classify_disconnect, HealthHandle, HealthMonitor, HealthSignal};
 use crate::ssh::host_key::{check_known_host, HostKeyCheck, HostKeyFacts, KnownHostRecord};
 use russh::client::AuthResult;
-use russh::client::{self, Handle};
+use russh::client::{self, DisconnectReason, Handle};
 use russh::keys::ssh_key::HashAlg;
 use russh::keys::ssh_key::PublicKey as SshPublicKey;
 use russh::keys::PrivateKey;
@@ -56,9 +57,12 @@ impl PresentedHostKey {
 
 /// Outcome of a connect attempt.
 pub enum ConnectOutcome {
-    /// Authenticated session ready for `direct-tcpip` forwarding.
+    /// Authenticated session ready for `direct-tcpip` forwarding. The
+    /// [`HealthHandle`] observes transport loss so the caller can drive
+    /// reconnect (plan §5.4).
     Authenticated {
         handle: Arc<Mutex<Handle<HostKeyVerifyingHandler>>>,
+        health: HealthHandle,
     },
     /// Server key is not yet known. The caller must confirm `presented` out of
     /// band, persist a `KnownHostRecord`, then retry. Boxed to keep the enum
@@ -92,6 +96,8 @@ pub struct HostKeyVerifyingHandler {
     port: u16,
     known: Option<KnownHostRecord>,
     decision: Arc<Mutex<HostKeyDecision>>,
+    /// Session-health signal written from `disconnected()` (plan §5.4).
+    health: HealthSignal,
 }
 
 impl HostKeyVerifyingHandler {
@@ -99,6 +105,7 @@ impl HostKeyVerifyingHandler {
         host: &str,
         port: u16,
         known: Option<KnownHostRecord>,
+        health: HealthSignal,
     ) -> (Self, Arc<Mutex<HostKeyDecision>>) {
         let decision = Arc::new(Mutex::new(HostKeyDecision::Pending));
         (
@@ -107,6 +114,7 @@ impl HostKeyVerifyingHandler {
                 port,
                 known,
                 decision: decision.clone(),
+                health,
             },
             decision,
         )
@@ -157,6 +165,25 @@ impl client::Handler for HostKeyVerifyingHandler {
     ) -> Result<(), Self::Error> {
         Ok(())
     }
+
+    /// Observe session end (plan §5.4). russh calls this for both clean
+    /// disconnects (`ReceivedDisconnect`) and error-driven closes — including
+    /// `Error::KeepaliveTimeout` when keepalive probes go unanswered past the
+    /// configured threshold. We classify the reason into a non-sensitive
+    /// [`crate::error::SessionCloseReason`] and push it to the health channel
+    /// so the connection supervisor can trigger reconnect. Returning `Ok`
+    /// everywhere: the raw error is losslessly captured in the classified
+    /// reason; re-emitting it would only surface as a generic
+    /// `Error::Disconnect` at the russh call site.
+    async fn disconnected(
+        &mut self,
+        reason: DisconnectReason<Self::Error>,
+    ) -> Result<(), Self::Error> {
+        let classified = classify_disconnect(&reason);
+        tracing::info!(close_reason = classified.as_str(), "ssh session ended");
+        self.health.report_close(classified);
+        Ok(())
+    }
 }
 
 /// Connect to `host:port`, enforce host-key policy, then authenticate.
@@ -187,7 +214,13 @@ async fn connect_with_timeout(
     //    rather than a generic transport error (AGENTS.md §9).
     let addr = resolve(host, port).await?;
 
-    let (handler, decision) = HostKeyVerifyingHandler::new(host, port, known.cloned());
+    // Build the session-health monitor before connect so the handler can
+    // report the close reason from inside the session task (plan §5.4).
+    let monitor = HealthMonitor::new();
+    let health = monitor.handle();
+
+    let (handler, decision) =
+        HostKeyVerifyingHandler::new(host, port, known.cloned(), monitor.signal());
 
     let config = client::Config {
         // Keepalive (design §8.5). 25s is within the suggested 20–30s band.
@@ -237,6 +270,7 @@ async fn connect_with_timeout(
     match result {
         AuthResult::Success => Ok(ConnectOutcome::Authenticated {
             handle: Arc::new(Mutex::new(handle)),
+            health,
         }),
         AuthResult::Failure { .. } => Err(SshError::AuthenticationFailed {
             user: username.to_string(),

@@ -13,9 +13,10 @@ use crate::error::PlatformError;
 /// Where the app currently is in the mobile lifecycle. Desktop is always
 /// `Foreground` for the purposes of reconnect policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum AppLifecycle {
-    Foreground,
-    Background,
+    Foreground = 0,
+    Background = 1,
 }
 
 /// Return the platform default profile store path inside the app's private

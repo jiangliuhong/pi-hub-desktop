@@ -12,6 +12,7 @@ import { ProductCard } from "./ProductCard";
 import { stageLabel } from "./labels";
 import type { PackageManagementActions } from "./usePackageManagement";
 import type {
+  PackageErrorDto,
   PackageManagementSnapshot,
   PackageOperationStage,
   ProductAction,
@@ -22,14 +23,18 @@ export interface PackageManagementSettingsProps {
   snapshot: PackageManagementSnapshot;
   loading: boolean;
   actions: PackageManagementActions;
-  errorText: string | null;
+  /** Last actionable error (global banner fallback). */
+  error: PackageErrorDto | null;
+  /** Product the {@link error} is attributed to, or null. */
+  errorProduct: ProductId | null;
 }
 
 export function PackageManagementSettings({
   snapshot,
   loading,
   actions,
-  errorText,
+  error,
+  errorProduct,
 }: PackageManagementSettingsProps) {
   const { prerequisites, products, active_operation: activeOp } = snapshot;
   const busy =
@@ -38,64 +43,51 @@ export function PackageManagementSettings({
     activeOp?.stage !== "failed" &&
     activeOp?.stage !== "cancelled";
 
-  const onAction = (action: ProductAction, product: ProductId) => {
+  const onAction = (
+    action: ProductAction,
+    product: ProductId,
+  ): Promise<void> => {
     switch (action) {
       case "scan":
-        void actions.scan();
-        break;
+        return actions.scan(product);
       case "check_updates":
-        void actions.checkUpdates(true);
-        break;
+        return actions.checkUpdates(product, true);
       case "install":
-        void actions.install(product);
-        break;
+        return actions.install(product);
       case "update":
-        void actions.update(product);
-        break;
+        return actions.update(product);
       case "repair":
         // Repair is modeled as an install of the same/compatible version.
-        void actions.install(product);
-        break;
+        return actions.install(product);
       case "activate":
         // Activate the managed install for this product (manager resolves it).
-        void actions.activate(product);
-        break;
+        return actions.activate(product);
       case "cancel":
-        if (activeOp) void actions.cancel(activeOp.operation_id);
-        break;
+        return activeOp
+          ? actions.cancel(activeOp.operation_id)
+          : Promise.resolve();
       case "confirm_restart":
-        if (activeOp) void actions.confirmRestart(activeOp.operation_id);
-        break;
+        return activeOp
+          ? actions.confirmRestart(activeOp.operation_id)
+          : Promise.resolve();
     }
   };
 
   return (
-    <div className="settings-card">
-      <h3>本机组件</h3>
-      <p className="settings-description">
-        分别检测并管理本机 Pi 与 Pi Hub。安装或更新只写入 Desktop
-        受管目录，不会修改 Homebrew / NVM / Volta
-        等外部安装，也不会请求管理员权限。
-      </p>
-
-      <div className="pkg-prereqs">
-        <PrereqItem
-          label="Node.js"
-          ok={prerequisites.node.satisfied}
-          detail={prerequisites.node.version}
-          issue={prerequisites.node.issue}
-        />
-        <PrereqItem
-          label="npm"
-          ok={prerequisites.npm.satisfied}
-          detail={prerequisites.npm.version}
-          issue={prerequisites.npm.issue}
-        />
+    <div className="settings-card pkg-settings">
+      <div className="pkg-section-heading">
+        <div>
+          <h3>npm 全局组件</h3>
+          <p className="settings-description">
+            管理当前 Node.js 环境中的 Pi 与 Pi Hub，无需管理员权限。
+          </p>
+        </div>
+        <PrerequisiteSummary prerequisites={prerequisites} />
       </div>
 
-      {errorText ? (
+      {error ? (
         <p className="pkg-issue" role="alert">
-          {errorText}
+          {error.message}
         </p>
       ) : null}
 
@@ -108,53 +100,66 @@ export function PackageManagementSettings({
           <ProductCard
             key={p.product}
             status={p}
+            loading={loading}
             busy={busy}
             onAction={onAction}
+            actionError={errorProduct === p.product ? error : null}
           />
         ))}
-      </div>
-
-      <div className="pkg-global-actions">
-        <button
-          type="button"
-          className="pkg-btn pkg-btn-secondary"
-          disabled={loading || busy}
-          onClick={() => void actions.scan()}
-        >
-          重新扫描
-        </button>
-        <button
-          type="button"
-          className="pkg-btn pkg-btn-secondary"
-          disabled={loading || busy}
-          onClick={() => void actions.checkUpdates(true)}
-        >
-          检查更新
-        </button>
       </div>
     </div>
   );
 }
 
-function PrereqItem({
+function PrerequisiteSummary({
+  prerequisites,
+}: {
+  prerequisites: PackageManagementSnapshot["prerequisites"];
+}) {
+  return (
+    <div className="pkg-environment" aria-label="npm 运行环境">
+      <EnvironmentItem
+        label="Node.js"
+        satisfied={prerequisites.node.satisfied}
+        version={prerequisites.node.version}
+        issue={prerequisites.node.issue}
+      />
+      <EnvironmentItem
+        label="npm"
+        satisfied={prerequisites.npm.satisfied}
+        version={prerequisites.npm.version}
+        issue={prerequisites.npm.issue}
+      />
+    </div>
+  );
+}
+
+function EnvironmentItem({
   label,
-  ok,
-  detail,
+  satisfied,
+  version,
   issue,
 }: {
   label: string;
-  ok: boolean;
-  detail?: string;
+  satisfied: boolean;
+  version?: string;
   issue?: string;
 }) {
+  const value = satisfied ? versionLabel(version) : "不可用";
   return (
-    <div className={`pkg-prereq${ok ? "" : " pkg-prereq-bad"}`}>
-      <span className="pkg-prereq-symbol">{ok ? "✓" : "✕"}</span>
-      <span className="pkg-prereq-label">{label}</span>
-      {detail ? <span className="pkg-prereq-detail">{detail}</span> : null}
-      {!ok && issue ? <span className="pkg-prereq-issue">{issue}</span> : null}
-    </div>
+    <span
+      className={`pkg-environment-item${satisfied ? "" : " pkg-environment-item-error"}`}
+      title={issue}
+    >
+      <strong>{label}</strong>
+      <span>{value}</span>
+    </span>
   );
+}
+
+function versionLabel(version?: string): string {
+  if (!version) return "可用";
+  return version.startsWith("v") ? version : `v${version}`;
 }
 
 function OperationProgress({

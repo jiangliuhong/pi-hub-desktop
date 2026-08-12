@@ -1,11 +1,14 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams, Link } from "react-router-dom";
+import { listen } from "@tauri-apps/api/event";
 import {
   connectService,
   getConnectionStatus,
   respondHostKeyChallenge,
+  STATE_CHANGED_EVENT,
   type ConnectResult,
   type HostKeyChallengeDto,
+  type StateChangedPayload,
 } from "./api";
 import { connectionStateLabel } from "./model";
 import { HostKeyDialog } from "./HostKeyDialog";
@@ -52,6 +55,26 @@ export function ConnectionPage() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
+
+  // Reliability (plan §5.5.1): reflect Rust-driven state changes — including
+  // `reconnecting` — so the user sees the real connection state rather than a
+  // stale local guess. The Rust ConnectionManager is the source of truth.
+  useEffect(() => {
+    if (!id) return;
+    const unlisten = listen<StateChangedPayload>(
+      STATE_CHANGED_EVENT,
+      (event) => {
+        if (event.payload.service_id !== id) return;
+        // Only adopt Rust-driven states that aren't already handled locally.
+        // `reconnecting` / `error` during a live connection surface here; the
+        // happy-path `connected` is handled by the connect result handler.
+        setState(event.payload.state);
+      },
+    );
+    return () => {
+      void unlisten.then((fn) => fn());
+    };
   }, [id]);
 
   const handleResult = (result: ConnectResult) => {
@@ -170,6 +193,14 @@ function DiagnosticsPanel({
         <dd>{diagnostics.listener_started ? "是" : "否"}</dd>
         <dt>重试次数</dt>
         <dd>{diagnostics.retry_count}</dd>
+        <dt>重连次数</dt>
+        <dd>{diagnostics.reconnect_count}</dd>
+        {diagnostics.last_close_reason ? (
+          <>
+            <dt>上次断开原因</dt>
+            <dd>{diagnostics.last_close_reason}</dd>
+          </>
+        ) : null}
       </dl>
       <p className="hint">
         诊断信息只包含非敏感数据（FR-016）。本地随机端口不在此展示。

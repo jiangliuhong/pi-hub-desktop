@@ -22,7 +22,14 @@ export type ConnectionErrorCode =
   | "service_http_error"
   | "tls_error"
   | "cancelled"
-  | "unsupported_platform";
+  | "unsupported_platform"
+  // Connection reliability codes (plan-remote-pi-hub-performance §5.6).
+  | "ssh_keepalive_timeout"
+  | "ssh_transport_closed"
+  | "ssh_channel_open_failed"
+  | "network_path_changed"
+  | "foreground_session_invalid"
+  | "viewer_reload_failed";
 
 /** Connection lifecycle states. */
 export type ConnectionState =

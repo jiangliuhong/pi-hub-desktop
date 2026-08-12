@@ -105,6 +105,12 @@ impl ServiceProfile {
         }
     }
 
+    /// True for SSH Forward connections (the only kind eligible for the
+    /// auto-reconnect supervisor — plan §5.5; direct URL does not reconnect).
+    pub fn is_ssh_forward(&self) -> bool {
+        matches!(self, ServiceProfile::SshForward(_))
+    }
+
     pub fn metadata(&self) -> &ProfileMetadata {
         match self {
             ServiceProfile::DirectUrl(p) => &p.metadata,

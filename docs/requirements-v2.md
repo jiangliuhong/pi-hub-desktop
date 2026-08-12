@@ -80,6 +80,8 @@ V2 必须区分：
 
 ### 3.2 自动启动的含义
 
+> **设计决策（手动检测模型）**：当前版本未实现「打开 App 时自动检测 / 自动启动」。本机 Runtime 的检测（`scan_local_installations`）、启动、停止、重启全部由用户在「This Mac」卡片手动触发；App 启动和窗口聚焦不再自动 refresh 或 auto-start。本节其余条文保留为原始 V2 需求基线，`auto_start_on_app_launch` 设置项与崩溃循环保护代码保留向前兼容；若未来恢复自动启动，以本节为需求基线。
+
 V2 中“自动启动”专指：
 
 > 打开 Pi Hub Client macOS App 时，自动拉起本机 Pi Hub。
@@ -153,7 +155,7 @@ iOS：
 > 注：V2 仍不实现 Pi / Pi Hub 的自动安装/升级；该能力已在 V3 纳入范围（见 `docs/requirements-v3.md`）。以下“自动安装/升级 Node.js”“任意 Shell 命令配置”“强制停止外部 Pi Hub”等在 V2 与 V3 均不实现。
 
 - 自动安装或升级 Node.js（V2 / V3 均不实现）；
-- 原地执行 `npm install -g` 修改用户外部全局安装（V2 不实现；V3 受管安装使用独立 staging，不原地修改外部安装）；
+- 原地执行 `npm install -g` 修改用户外部全局安装（V2 不实现；V3 按 `requirements-v3.md` §0.1 只管理当前 Node 工具链的 npm 全局 Pi / Pi Hub）；
 - 自动安装、升级或卸载 Pi（V2 不实现；V3 受管安装/更新见 `docs/requirements-v3.md`）；
 - 自动安装、升级或卸载 Pi Hub（V2 不实现；V3 受管安装/更新见 `docs/requirements-v3.md`）；
 - 任意 Shell 命令配置；
@@ -188,7 +190,7 @@ This Mac
 Pi Hub 0.0.x
 正在运行 · 由 Pi Hub Client 管理
 
-[打开] [停止] [重启]
+[连接] [停止] [重启]
 ```
 
 ### 6.3 由终端启动
@@ -198,7 +200,7 @@ This Mac
 Pi Hub 0.0.x
 正在运行 · 外部启动
 
-[打开]
+[连接]
 ```
 
 默认不显示可直接执行的“停止”按钮，并说明应在原启动位置停止。
@@ -516,9 +518,10 @@ http://127.0.0.1:30142
 - 显示端口和建议；
 - 允许用户修改本机 Pi Hub 端口。
 
-### V2-FR-011 打开本机 Pi Hub
+### V2-FR-011 连接本机 Pi Hub
 
-运行状态有效后，使用 V1 已有 Viewer 打开本机 Pi Hub。
+运行状态有效后，“连接”必须先通过 Rust 重新探测本机服务身份与运行状态，
+然后使用 V1 已有 Viewer 在应用内打开本机 Pi Hub；不得交给系统浏览器。
 
 必须继续保证：
 
@@ -737,7 +740,7 @@ Pi Hub 0.0.x · Node 24.x
 ● 正在运行（由 Client 管理）
 http://127.0.0.1:30142
 
-[打开] [停止] [重启]
+[连接] [停止] [重启]
 
 环境：Ready
 ```

@@ -866,6 +866,8 @@ RunningManaged → stop → required checks → start
 
 ## 14. 自动启动与崩溃循环保护
 
+> **设计决策（手动检测模型）**：当前版本未在 App 启动时调用 `initialize_local_runtime`，窗口聚焦时也不再自动 refresh。本机 Runtime 检测与启停完全由用户在「This Mac」卡片手动触发（`scan_local_installations` / `start` / `stop` / `restart`）。`LocalRuntimeManager::initialize()` 方法与崩溃循环保护代码保留，供未来恢复自动启动时复用。详见 `docs/requirements-v2.md` §3.2。
+
 ### 14.1 App 启动
 
 Trusted App Shell 创建后异步调用：
@@ -1234,6 +1236,9 @@ Desktop 仍终止受管进程组，Pi Hub 的信号转发用于完成应用级�
 - SSH Forward；
 - Host Key；
 - Viewer；
+- 本机 Runtime 的“连接”复用受限 Viewer：进入 Viewer 前由 Rust `refresh`
+  重新验证 `/api/client-info`，只加载其返回的 loopback `effective_url`，不调用
+  系统浏览器，也不向被嵌入页面授予 Tauri capability；
 - Keychain；
 - 本机 Runtime UI 不可见。
 

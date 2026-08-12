@@ -6,6 +6,7 @@ import { ViewerToolbar } from "../features/viewer/ViewerToolbar";
 import { LocalRuntimeSettingsPage } from "../features/local-runtime/LocalRuntimeSettingsPage";
 import { EnvironmentDoctorPage } from "../features/local-runtime/EnvironmentDoctorPage";
 import { RuntimeLogsPage } from "../features/local-runtime/RuntimeLogsPage";
+import { LocalRuntimeViewer } from "../features/local-runtime/LocalRuntimeViewer";
 import { PagePlaceholder } from "../components/PagePlaceholder";
 
 /**
@@ -36,6 +37,7 @@ export function AppRoutes() {
         element={<EnvironmentDoctorPage />}
       />
       <Route path="/local-runtime/logs" element={<RuntimeLogsPage />} />
+      <Route path="/local-runtime/viewer" element={<LocalRuntimeViewer />} />
       <Route
         path="*"
         element={

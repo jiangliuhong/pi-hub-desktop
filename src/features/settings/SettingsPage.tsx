@@ -1,7 +1,5 @@
 import { useEffect } from "react";
 import { useTheme, type ThemeMode } from "../../app/theme";
-import { usePackageManagement } from "../package-management/usePackageManagement";
-import { PackageManagementSettings } from "../package-management/PackageManagementSettings";
 
 const options: { value: ThemeMode; label: string; description: string }[] = [
   { value: "light", label: "亮色", description: "始终使用亮色外观" },
@@ -15,7 +13,6 @@ const options: { value: ThemeMode; label: string; description: string }[] = [
 
 export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const { mode, setMode } = useTheme();
-  const pkg = usePackageManagement();
 
   useEffect(() => {
     const closeOnEscape = (event: KeyboardEvent) => {
@@ -70,15 +67,6 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
             ))}
           </fieldset>
         </div>
-
-        {pkg.supported ? (
-          <PackageManagementSettings
-            snapshot={pkg.snapshot}
-            loading={pkg.loading}
-            actions={pkg.actions}
-            errorText={pkg.error?.message ?? null}
-          />
-        ) : null}
       </section>
     </div>
   );

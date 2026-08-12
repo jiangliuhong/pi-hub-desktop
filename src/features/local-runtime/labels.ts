@@ -14,7 +14,10 @@ import type {
   LocalRuntimeState,
 } from "./types";
 
-export function runtimeStateLabel(state: LocalRuntimeState): string {
+export function runtimeStateLabel(
+  state: LocalRuntimeState,
+  lastErrorCode?: string,
+): string {
   switch (state) {
     case "unknown":
       return "未知状态";
@@ -33,6 +36,15 @@ export function runtimeStateLabel(state: LocalRuntimeState): string {
     case "port_conflict":
       return "端口冲突";
     case "failed":
+      if (lastErrorCode === "pi_hub_doctor_blocked") {
+        return "启动被阻止";
+      }
+      if (
+        lastErrorCode === "local_port_not_released" ||
+        lastErrorCode === "local_process_stop_timeout"
+      ) {
+        return "停止失败";
+      }
       return "启动失败";
   }
 }
@@ -81,6 +93,7 @@ export function sourceLabel(source: InstallationSource): string {
     asdf: "ASDF",
     mise: "Mise",
     manual: "手动选择",
+    npm_global: "npm 全局安装",
     desktop_managed: "Desktop 受管",
   };
   return map[source];

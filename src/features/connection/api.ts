@@ -10,6 +10,26 @@ import { callCommand } from "../../lib/tauri";
 import type { ConnectionState } from "./model";
 import type { ConnectionDiagnostics } from "../../types";
 
+/**
+ * Event names pushed from the Rust ConnectionManager to the App Shell
+ * (plan-remote-pi-hub-performance §5.5). Tauri v2 does not allowlist event
+ * names, so these require no capability entry.
+ */
+export const STATE_CHANGED_EVENT = "connection://state-changed";
+export const DIAGNOSTICS_UPDATED_EVENT = "connection://diagnostics-updated";
+
+/** Non-sensitive payload for `connection://state-changed`. */
+export interface StateChangedPayload {
+  service_id: string;
+  state: ConnectionState;
+  effective_url?: string;
+}
+
+/** Non-sensitive payload for `connection://diagnostics-updated`. */
+export interface DiagnosticsPayload extends ConnectionDiagnostics {
+  service_id: string;
+}
+
 /** Result of `connect_service`: ready, or a host-key confirmation (FR-007). */
 export type ConnectResult =
   | { kind: "connected"; effective_url: string }

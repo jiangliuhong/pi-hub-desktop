@@ -34,17 +34,19 @@ pub async fn get_package_management_status(
 #[tauri::command]
 pub async fn scan_managed_products(
     manager: State<'_, std::sync::Arc<PackageManagementManager>>,
+    product: ProductId,
 ) -> Result<PackageManagementSnapshot, ErrorDto> {
-    manager.scan().await.map_err(map_err)
+    manager.scan(product).await.map_err(map_err)
 }
 
 #[tauri::command]
 pub async fn check_product_updates(
     manager: State<'_, std::sync::Arc<PackageManagementManager>>,
+    product: ProductId,
     force: Option<bool>,
 ) -> Result<PackageManagementSnapshot, ErrorDto> {
     manager
-        .check_updates(force.unwrap_or(true))
+        .check_product_update(product, force.unwrap_or(true))
         .await
         .map_err(map_err)
 }

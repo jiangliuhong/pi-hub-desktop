@@ -63,8 +63,8 @@ impl ConnectionProvider for SshForwardProvider {
         )
         .await?;
 
-        let handle = match connect {
-            SshConnectOutcome::Authenticated { handle } => handle,
+        let (handle, health) = match connect {
+            SshConnectOutcome::Authenticated { handle, health } => (handle, health),
             SshConnectOutcome::HostKeyNeedsConfirmation(boxed) => {
                 let presented = *boxed;
                 set_stage(&context.diagnostics, "verifying_host_key").await;
@@ -103,6 +103,7 @@ impl ConnectionProvider for SshForwardProvider {
             effective_url,
             resources: ConnectionResources {
                 forward: Some(forward),
+                health: Some(health),
                 cancellation: context.cancellation.clone(),
             },
         }))

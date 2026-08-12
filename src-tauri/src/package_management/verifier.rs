@@ -1,8 +1,7 @@
 //! Post-install verification (docs/requirements-v3.md V3-SR-007; design §17.4).
 //!
-//! Runs **before** activation, on the staging copy. If any check fails, the
-//! staging dir is discarded and the active installation is left untouched
-//! (design §11.1). Verification never trusts file names alone: package
+//! Runs after npm has written the selected global prefix. Verification never
+//! trusts file names alone: package
 //! identity, exact version, the bin entry, the production build (Pi Hub), and a
 //! live `--version` run must all agree.
 
@@ -15,7 +14,7 @@ use std::time::Duration;
 
 const SHORT_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// A verified staging install, safe to activate (design §11.1).
+/// A verified npm-global install, safe for runtime use.
 #[derive(Debug, Clone)]
 pub struct VerifiedInstall {
     pub product: ProductId,
@@ -31,7 +30,7 @@ pub trait PostInstallVerifier: Send + Sync {
         &self,
         product: ProductId,
         expected_version: semver::Version,
-        staging_dir: &Path,
+        install_root: &Path,
         node_executable: &Path,
     ) -> Result<VerifiedInstall, PackageManagementError>;
 }
@@ -56,15 +55,17 @@ impl PostInstallVerifier for DefaultPostInstallVerifier {
         &self,
         product: ProductId,
         expected_version: semver::Version,
-        staging_dir: &Path,
+        install_root: &Path,
         node_executable: &Path,
     ) -> Result<VerifiedInstall, PackageManagementError> {
         let pkg = package_name(product);
-        let pkg_root = canonicalize_required(&staging_dir.join("node_modules").join(pkg))?;
+        let pkg_root = find_global_package_root(install_root, pkg).ok_or_else(|| {
+            VerificationError::new(product, "package root not found in npm global root")
+        })?;
         if !pkg_root.is_dir() {
             return Err(VerificationError::new(
                 product,
-                "package root not found in staging",
+                "package root not found in npm global root",
             ));
         }
 
@@ -128,6 +129,16 @@ impl PostInstallVerifier for DefaultPostInstallVerifier {
             entrypoint,
         })
     }
+}
+
+fn find_global_package_root(prefix_or_root: &Path, package: &str) -> Option<PathBuf> {
+    [
+        prefix_or_root.join("node_modules").join(package),
+        prefix_or_root.join("lib/node_modules").join(package),
+        prefix_or_root.join(package),
+    ]
+    .into_iter()
+    .find_map(|candidate| canonicalize_required(&candidate).ok())
 }
 
 /// Parsed package.json identity fields.

@@ -274,7 +274,7 @@ async fn direct_tcpip_round_trips_http_through_tunnel() {
     .await
     .expect("retry connect");
     let handle = match outcome {
-        ConnectOutcome::Authenticated { handle } => handle,
+        ConnectOutcome::Authenticated { handle, .. } => handle,
         _ => panic!("expected authenticated after confirmation"),
     };
 
@@ -343,7 +343,7 @@ async fn cancel_stops_accept_loop() {
     .await
     .expect("connect");
     let handle = match outcome {
-        ConnectOutcome::Authenticated { handle } => handle,
+        ConnectOutcome::Authenticated { handle, .. } => handle,
         _ => panic!("authenticated"),
     };
     let cancel = CancellationToken::new();
@@ -366,3 +366,79 @@ async fn cancel_stops_accept_loop() {
 // Keep otherwise-unused imports referenced for the documented server contract.
 #[allow(dead_code)]
 fn _touch(_h: HashAlg, _c: ChannelMsg) {}
+
+/// Plan §5.4: the session-health monitor must observe SSH transport loss so
+/// the connection layer can trigger reconnect. We connect + authenticate,
+/// capture the `HealthHandle` returned alongside the SSH handle, then sever
+/// the transport from the client side via `Handle::disconnect`. The health
+/// channel must report a close within a bounded timeout.
+#[tokio::test]
+async fn health_monitor_observes_transport_close() {
+    let target = spawn_mock_pihub().await;
+    let (server_addr, server_key) = spawn_ssh_server(target).await;
+
+    // First attempt yields the unknown-host confirmation; persist it.
+    let presented = client_connect_and_forward(
+        server_addr,
+        &server_key,
+        SshAuth::Password(SSH_PASS.to_string()),
+        "ignored",
+        0,
+    )
+    .await
+    .expect("presented");
+    let record = KnownHostRecord {
+        host: server_addr.ip().to_string(),
+        port: server_addr.port(),
+        algorithm: presented.algorithm.clone(),
+        public_key: presented.public_key_bytes.clone(),
+        sha256_fingerprint: presented.sha256_fingerprint.clone(),
+        trusted_at: chrono::Utc::now(),
+    };
+
+    // Second attempt succeeds with a known host; capture the health handle.
+    let outcome = client::connect_and_authenticate(
+        &server_addr.ip().to_string(),
+        server_addr.port(),
+        SSH_USER,
+        Some(&record),
+        SshAuth::Password(SSH_PASS.to_string()),
+    )
+    .await
+    .expect("connect");
+    let (handle, mut health) = match outcome {
+        ConnectOutcome::Authenticated { handle, health } => (handle, health),
+        _ => panic!("expected authenticated"),
+    };
+
+    // Sanity: the session is alive before we sever it.
+    assert!(!health.is_closed(), "session should start healthy");
+
+    // Sever the transport from the client side. russh routes this through the
+    // same `disconnected` path the reliability feature relies on.
+    {
+        let h = handle.lock().await;
+        h.disconnect(russh::Disconnect::ByApplication, "", "en")
+            .await
+            .ok();
+    }
+
+    // The health monitor must observe the close within a bounded window.
+    let reason = tokio::time::timeout(Duration::from_secs(5), health.closed())
+        .await
+        .expect("health channel should report close after transport loss");
+
+    // A client-initiated clean disconnect is classified as a remote-style
+    // disconnect (the server echoes a DISCONNECT). Either way, the reason must
+    // be one of the known, non-sensitive classifications — never raw data.
+    assert!(
+        matches!(
+            reason,
+            pi_hub_client_lib::error::SessionCloseReason::RemoteDisconnect
+                | pi_hub_client_lib::error::SessionCloseReason::NetworkError
+                | pi_hub_client_lib::error::SessionCloseReason::Unknown
+        ),
+        "unexpected close reason: {reason:?}"
+    );
+    assert!(health.is_closed());
+}

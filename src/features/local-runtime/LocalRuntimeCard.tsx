@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { listen } from "@tauri-apps/api/event";
 import {
   getLocalRuntimeStatus,
   restartLocalPiHub,
+  scanLocalInstallations,
   startLocalPiHub,
   stopLocalPiHub,
   STATUS_CHANGED_EVENT,
@@ -21,6 +22,7 @@ import type { AppErrorDto } from "../../lib/tauri";
  * local state is never trusted for process existence (design-v2 §17.3).
  */
 export function LocalRuntimeCard() {
+  const navigate = useNavigate();
   const [snapshot, setSnapshot] = useState<LocalRuntimeSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<LocalRuntimeState | null>(null);
@@ -58,9 +60,20 @@ export function LocalRuntimeCard() {
     try {
       setSnapshot(await fn());
     } catch (e) {
-      setError(toMessage(e));
-      // Re-sync from the server (it recorded the failure).
-      void reload();
+      const dto = toErrorDto(e);
+      const message = dto?.message ?? "发生未知错误。";
+      // Re-sync from Rust, which records domain failures in `last_error`.
+      // When both surfaces describe the same error, render only the persisted
+      // error so the card does not show duplicate banners.
+      try {
+        const next = await getLocalRuntimeStatus();
+        setSnapshot(next);
+        setError(
+          dto?.code && next.last_error?.code === dto.code ? null : message,
+        );
+      } catch {
+        setError(message);
+      }
     } finally {
       setPending(null);
     }
@@ -73,6 +86,9 @@ export function LocalRuntimeCard() {
     snapshot?.runtime_state === "running_managed" ||
     snapshot?.runtime_state === "running_external";
   const envBlocked = snapshot?.environment?.overall === "blocked";
+  // Detection gate for Start: node + pi_hub both detected (AGENTS.md §8.1 —
+  // external `pi` CLI is informational, not a hard dependency).
+  const installationReady = snapshot?.installation_state === "ready";
   const installation = snapshot?.installation;
   const piHubVersion = installation?.pi_hub?.version;
   const nodeVersion = installation?.node?.version;
@@ -81,8 +97,12 @@ export function LocalRuntimeCard() {
     <section className="local-runtime-card" aria-label="本机 Pi Hub">
       <header className="local-runtime-header">
         <h2>This Mac</h2>
-        <span className={`badge badge-${snapshot?.runtime_state ?? "unknown"}`}>
-          {runtimeStateLabel(state)}
+        <span
+          className={`badge badge-${snapshot?.runtime_state ?? "unknown"}`}
+          aria-live="polite"
+        >
+          <span className="badge-dot" aria-hidden="true" />
+          {runtimeStateLabel(state, snapshot?.last_error?.code)}
         </span>
       </header>
 
@@ -109,23 +129,56 @@ export function LocalRuntimeCard() {
         </div>
       ) : null}
 
+      {snapshot?.last_error ? (
+        <div role="alert" className="error-banner local-runtime-last-error">
+          <div className="local-runtime-last-error-head">
+            <span>{snapshot.last_error.message}</span>
+            {snapshot.last_error.code === "pi_hub_doctor_blocked" ? (
+              <Link to="/local-runtime/environment">查看检查结果</Link>
+            ) : (
+              <Link to="/local-runtime/logs">查看日志</Link>
+            )}
+          </div>
+          {snapshot.last_error.details?.recentOutput ? (
+            <pre className="local-runtime-recent-output">
+              {snapshot.last_error.details.recentOutput}
+            </pre>
+          ) : null}
+        </div>
+      ) : null}
+
       <div className="local-runtime-actions">
+        <button
+          type="button"
+          className="local-action local-action-subtle"
+          disabled={busy}
+          title="检测本机 Node.js / Pi Hub 安装与端口状态"
+          onClick={() => void run(scanLocalInstallations, "checking")}
+        >
+          检测安装
+        </button>
         {isRunning ? (
           <button
             type="button"
-            onClick={() => {
-              window.open(snapshot?.effective_url, "_blank", "noopener");
-            }}
+            className="local-action local-action-primary"
+            onClick={() => void navigate("/local-runtime/viewer")}
           >
-            打开
+            连接
           </button>
         ) : null}
         {snapshot?.runtime_state === "stopped" ||
         snapshot?.runtime_state === "failed" ? (
           <button
             type="button"
-            disabled={busy || envBlocked}
-            title={envBlocked ? "存在阻断项，无法启动" : undefined}
+            className="local-action local-action-primary"
+            disabled={busy || envBlocked || !installationReady}
+            title={
+              envBlocked
+                ? "存在阻断项，无法启动"
+                : !installationReady
+                  ? "未检测到可用的 Pi Hub，请先点检测"
+                  : undefined
+            }
             onClick={() => void run(startLocalPiHub, "starting")}
           >
             启动
@@ -135,6 +188,7 @@ export function LocalRuntimeCard() {
           <>
             <button
               type="button"
+              className="local-action"
               disabled={busy}
               onClick={() => void run(stopLocalPiHub, "stopping")}
             >
@@ -142,6 +196,7 @@ export function LocalRuntimeCard() {
             </button>
             <button
               type="button"
+              className="local-action"
               disabled={busy}
               onClick={() => void run(restartLocalPiHub, "stopping")}
             >
@@ -149,15 +204,38 @@ export function LocalRuntimeCard() {
             </button>
           </>
         ) : null}
-        <Link to="/local-runtime/environment">查看检查结果</Link>
-        <Link to="/local-runtime/settings">设置</Link>
-        <Link to="/local-runtime/logs">日志</Link>
+        <span className="local-actions-divider" aria-hidden="true" />
+        <Link
+          className="local-action local-action-link"
+          to="/local-runtime/environment"
+        >
+          查看检查结果
+        </Link>
+        <Link
+          className="local-action local-action-link"
+          to="/local-runtime/settings"
+        >
+          设置
+        </Link>
+        <Link
+          className="local-action local-action-link"
+          to="/local-runtime/logs"
+        >
+          日志
+        </Link>
       </div>
     </section>
   );
 }
 
+function toErrorDto(e: unknown): AppErrorDto | undefined {
+  if (!e || typeof e !== "object") return undefined;
+  const dto = e as Partial<AppErrorDto>;
+  return typeof dto.code === "string" && typeof dto.message === "string"
+    ? (dto as AppErrorDto)
+    : undefined;
+}
+
 function toMessage(e: unknown): string {
-  const dto = e as AppErrorDto | undefined;
-  return dto?.message ?? "发生未知错误。";
+  return toErrorDto(e)?.message ?? "发生未知错误。";
 }

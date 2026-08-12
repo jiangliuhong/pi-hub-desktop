@@ -32,14 +32,14 @@ V1 文档定义远程 Pi Hub 连接能力；V2 文档定义 macOS 本机 Pi Hub 
 2. 检测本机 Pi Hub 的真实运行状态。
 3. 启动、停止和重启由当前 Desktop 实例管理的 Pi Hub。
 4. 检查 Pi Hub 内嵌 Pi Runtime、Agent 目录、Session、认证和模型基础状态。
-5. 按用户设置在打开 Desktop 时自动启动本机 Pi Hub。
+5. 按用户设置在打开 Desktop 时自动启动本机 Pi Hub。（当前版本未实现启动时自动检测/自动启动，改为手动模型，见 §10。）
 
 ### V3
 
 1. 分别检测本机 Pi 与 Pi Hub 的安装、来源、版本与更新状态。
 2. 联网检查 stable 最新版本（缓存、离线降级、不降级）。
-3. 在 Desktop 受管目录内安装或更新 Pi / Pi Hub（不修改用户外部环境，不请求 `sudo`）。
-4. 安装/更新使用固定包名、固定参数、原子激活、失败回滚与有限脱敏日志。
+3. 只检测当前 Node.js 工具链中通过 npm 全局方式安装的 Pi / Pi Hub，并允许用户显式安装或升级（不请求 `sudo`）。
+4. 安装/更新使用固定包名、固定参数、配对的绝对 Node/npm CLI、后置验证与有限脱敏日志。
 5. 与 V2 Local Runtime 启停、Doctor、外部进程识别集成；iOS 不提供本机组件管理。
 
 核心业务仍由 `pi-hub / pi-web` 提供。本仓库不得复制 Pi Hub 的会话、Agent、Scheduler、Workspace、模型或认证业务实现。
@@ -85,7 +85,7 @@ V2 本机 Runtime 与 V3 本机组件包管理只在 macOS 生效；iOS 必须�
 - 自动安装或升级 Node.js（V3 仍是非目标；Pi / Pi Hub 的受管安装与更新已纳入 V3，必须按 `docs/requirements-v3.md` 与本文件 §9 规则执行）
 - 任意 Shell 启动命令或环境变量编辑器
 - Mac App Store 沙盒适配
-- 后台静默更新、beta / 预发布通道、覆盖用户外部全局安装或写入系统目录（V3 非目标）
+- 后台静默更新、beta / 预发布通道、自动提权或写入当前 npm 全局 prefix 之外的目录（V3 非目标）
 
 发现这些需求时，应记录到后续版本，不得顺手实现。V3 范围内的安装/更新能力必须严格遵守本文件 §9 与 `docs/requirements-v3.md`，不得静默扩大范围。
 
@@ -225,12 +225,12 @@ Pi / Pi Hub 的检测、版本检查、受管安装与更新是独立领域，�
 
 ```text
 PackageManagementManager
-├── InstallationDetector（复用并扩展 V2 候选验证）
+├── GlobalNpmInstallationDetector
 ├── ReleaseClient
 ├── NpmToolchainDetector
 ├── PackageInstaller
 ├── PostInstallVerifier
-└── ManagedPackageStore
+└── OperationLogStore
 ```
 
 包管理器不复制 Pi Hub 进程管理逻辑；Pi Hub 激活、停止和重启通过最小适配接口委托给 `LocalRuntimeManager`。
@@ -409,6 +409,8 @@ Desktop 只解析白名单字段，不把 stdout 原文直接暴露给 UI。
 
 ### 8.7 自动启动
 
+> **当前版本设计决策**：本机 Runtime 检测与启停已改为完全手动模型（见 §10）。App 启动和窗口聚焦不再自动 refresh 或 auto-start；以下「自动启动」条文保留为原始 V2 需求，`auto_start_on_app_launch` 设置项与崩溃循环保护代码保留向前兼容，但当前版本无启动调用点。若未来恢复自动启动，以本节为需求基线。
+
 “自动启动”只表示打开 Desktop 时拉起本机 Pi Hub，不等于开机启动。
 
 - 设置默认关闭。
@@ -444,32 +446,32 @@ V3 在 V2 之外新增“本机组件管理”（Pi 与 Pi Hub 的检测、版�
 
 - V3 把 V2 “不自动安装/升级 Pi、Pi Hub” 的约束升级为“按 V3 文档规则受管安装/升级”。
 - Node.js 自动安装/升级在 V3 仍是非目标；Node.js 缺失或 npm 不可用时安装/更新被阻断。
-- beta/预发布通道、后台静默更新、覆盖外部全局安装、写入系统目录或 `sudo` 均为非目标。
+- beta/预发布通道、后台静默更新、自动提权、写入配对 npm global prefix 之外的目录或 `sudo` 均为非目标。
 
-### 9.2 受管副本模型
+### 9.2 npm 全局安装模型
 
-- 安装或更新目标始终是 Desktop 自己的用户级受管目录，不原地修改用户 Homebrew/NVM/Volta 等外部安装。
-- 外部安装继续展示，更新动作是“安装受管版本”，不得暗示外部环境被修改。
-- 两个产品（Pi / Pi Hub）隔离安装，manifest、staging、版本目录和日志相互独立。
+- 页面只把当前选定 Node.js 配套 npm 的 global root 中、身份和入口验证通过的包视为已安装。
+- PATH、Homebrew、standalone、手动路径或其他 Node 版本下的同名命令不得作为本页面的安装事实。
+- 安装与升级等价于对配对 npm 的 global prefix 执行固定包名、精确版本的全局安装；不得请求 `sudo`。prefix 不可写时返回稳定错误和修复建议。
+- Pi 与 Pi Hub 分别验证；Pi Hub 升级后的 Runtime 重启仍遵守进程所有权边界。
 
 ### 9.3 固定包名与命令
 
 - 包名来自 `ProductId` 固定映射，版本来自后端短期 release token。
 - 前端不得传 package、version spec、registry、命令、参数、PID、路径或环境。
-- npm 安装等价于 `<absolute-node> <absolute-npm-cli.js> install --prefix <staging> --no-save --package-lock=false --ignore-scripts --no-audit --no-fund --omit=dev <allowlisted-package>@<exact-version>`。
+- npm 安装等价于 `<absolute-node> <absolute-npm-cli.js> install --global --prefix <validated-global-prefix> --ignore-scripts --no-audit --no-fund --omit=dev <allowlisted-package>@<exact-version>`。
 - 参数由 Rust 固定构造，stdin 关闭，输出有界并脱敏。
 
-### 9.4 原子激活与回滚
+### 9.4 验证与失败处理
 
-- 同文件系统写临时 manifest，`fsync` 后 rename；版本目录由 staging rename。
-- 后置验证失败删除 staging，active manifest 不变。
-- 禁止在 active 目录原地 npm install、先删除旧版本或仅用 symlink 表达事务。
-- Pi Hub 新版本启动失败必须恢复旧 active 版本并报告回滚结果。
+- npm 全局安装完成后必须验证 package identity、精确版本、bin、Node engine 与版本命令；Pi Hub 还验证生产构建和 Doctor 契约。
+- npm 全局安装不具备 Desktop 私有 staging 的原子切换语义；失败时必须如实报告，不得宣称旧版本必然未变化。
+- Pi Hub 由当前 Desktop 管理时，升级后通过 `LocalRuntimeManager` 重启；外部进程不得由 Desktop 停止或 Kill。
 
 ### 9.5 进程所有权与 Runtime 协调
 
 - 包管理器不自行 Kill Pi Hub；Pi Hub 激活、停止和重启复用 `LocalRuntimeManager`。
-- `running_managed` 更新需用户确认“更新并重启”；`running_external` 只下载受管副本，不停止外部进程。
+- `running_managed` 更新需用户确认，升级后由 `LocalRuntimeManager` 重启；`running_external` 可以升级 npm 全局包，但不停止外部进程。
 - npm 安装子进程本身也是受管子进程，只终止 manager 持有 Handle 的进程组。
 
 ### 9.6 版本与 Registry
@@ -481,8 +483,8 @@ V3 在 V2 之外新增“本机组件管理”（Pi 与 Pi Hub 的检测、版�
 
 ### 9.7 文件系统与数据隔离
 
-- 写入必须位于 canonicalized 受管根；拒绝 `..`、跨根 symlink 和非预期路径。
-- package symlink 不得逃逸受管根。
+- 写入目标必须等于配对 npm 报告并验证的 global prefix；拒绝前端路径、`..`、跨 prefix 目标和非预期路径。
+- 检测只接受 global root 内的 package；package 入口 canonicalize 后必须仍属于该 package root。
 - 不写入或迁移 `~/.pi/agent` 会话、认证与 Session 数据。
 
 ### 9.8 日志与脱敏
@@ -503,8 +505,8 @@ V3 在 V2 之外新增“本机组件管理”（Pi 与 Pi Hub 的检测、版�
 ### macOS
 
 - V1 SSH 连接可持续到用户断开或 App 退出。
-- V2 本机 Runtime 按设置在 App 打开时检查/启动。
-- V3 受管安装/更新按用户显式操作执行；App 退出时取消进行中的安装事务并有界清理 staging，不长期常驻。
+- V2 本机 Runtime 的检测与启停由用户在「This Mac」卡片手动触发；App 启动和窗口聚焦不再自动 refresh 或 auto-start。`auto_start_on_app_launch` 设置项保留向前兼容，但当前版本无启动调用点（详见 `docs/requirements-v2.md` §3.2 设计决策）。
+- V3 npm 全局安装/更新按用户显式操作执行；App 退出时取消进行中的受管 npm 子进程，不长期常驻。
 - 退出时释放 SSH、Listener 和受管进程资源。
 - 当前版本不注册 LaunchAgent。
 
@@ -566,7 +568,7 @@ V3 包管理状态必须使用明确枚举（安装状态、更新状态、操�
 - 所有异步按钮有 loading、取消或防重复提交。
 - 高风险操作必须二次确认。
 - UI 不保存进程或 SSH 真相。
-- 普通用户界面不展示 SSH 命令或 Shell 命令。
+- 普通用户界面不展示 SSH 命令或任意 Shell 命令；V3 安装页可以只读展示由后端固定映射生成的 npm 全局安装/升级命令并允许复制，但不得编辑或把该文本作为执行输入。
 - macOS 服务列表顶部使用固定 `This Mac` 卡片，不把它保存为远程 Profile。
 - blocked 时禁止启动；degraded 时允许启动但明确提示。
 - external 状态默认不显示停止和重启操作。
@@ -623,7 +625,7 @@ V3 包管理状态必须使用明确枚举（安装状态、更新状态、操�
 - registry 白名单、ETag、TTL、离线缓存。
 - release token 绑定和过期。
 - npm 与 Node 配对及固定参数无 Shell。
-- staging/symlink 路径逃逸。
+- npm global prefix/root 一致性、package/bin symlink 路径逃逸。
 - manifest 原子写、迁移、损坏恢复。
 - generation、重复操作、取消只终止受管 npm child。
 - 日志上限和 Secret 脱敏。
@@ -646,7 +648,7 @@ V3 包管理状态必须使用明确枚举（安装状态、更新状态、操�
 - 无认证 / 无模型。
 - `Cmd + Q`。
 - Developer ID 签名、公证和 DMG。
-- V3：两者均无 / 单个 / 均有外部旧版本 / 已有受管版本、Node 过低或 npm 缺失、无网络或 registry 5xx、磁盘不足或目录不可写、managed/external/port conflict 更新与回滚、签名后受管目录权限。
+- V3：两者均无 / 单个 / 均有 npm 全局旧版本、Node 过低或 npm 缺失、无网络或 registry 5xx、global prefix 不可写、managed/external/port conflict 升级与重启、签名后 npm 全局目录权限。
 
 ### iOS 回归
 
@@ -667,6 +669,26 @@ V2 / V3 合并后仍需验证 iOS build、Direct URL、SSH Forward、Host Key、
 7. 执行格式化、类型检查、Lint 和测试。
 8. 更新行为、限制和设计决策文档。
 9. 提交说明写清已验证平台和未验证项。
+
+### 15.1 macOS 客户端启动与版本确认
+
+本仓库的 release bundle、debug bundle、`tauri dev` 进程以及可能安装到 `/Applications` 的 App 使用同一个 bundle identifier `top.jiangliuhong.pihubclient`。macOS 可能同时保留多个不同路径启动的实例；按显示名称或 bundle identifier 操作窗口时，也可能命中旧实例。另需注意：重新构建只更新磁盘产物，不会替换已经驻留内存的进程。因此曾出现以下问题：
+
+- `target/release/bundle/macos/Pi Hub Client.app` 与 `target/debug/bundle/macos/Pi Hub Client.app` 同时运行；
+- `npm run tauri -- dev` 已启动新后端，但 UI 自动化仍连接到旧 release 窗口；
+- 在旧 debug 进程运行期间重新构建 debug bundle，随后打开 App 时仍复用了构建前进程；
+- 使用 App 名称执行 `Cmd + Q` 只退出了其中一个实例，后续按名称读取状态又可能自动拉起旧 App；
+- 仅根据窗口标题或 `tauri://localhost` 无法证明正在运行当前源码。
+
+启动或重启客户端时必须执行以下流程：
+
+1. **先枚举进程**：启动前用只读进程检查确认所有 `pi-hub-desktop` 实例的 PID 与绝对可执行路径，区分 release、debug bundle、`target/debug/pi-hub-desktop` 和 `/Applications` 安装版本。
+2. **只终止已确认目标**：需要切换版本时，只退出绝对路径已确认的 Pi Hub Client 进程；不得按模糊进程名批量 Kill，不得影响 Pi Hub 服务或其他进程。退出后再次检查，确认旧实例确实消失。
+3. **构建后再重启**：构建前已经运行的实例一律视为旧实例。`npm run tauri -- build --debug --bundles app` 或 release build 完成后，必须退出构建前实例，再从本次构建输出的绝对 `.app` 路径启动。
+4. **开发模式保持唯一实例**：使用 `npm run tauri -- dev` 时，不得同时保留 release/debug bundle 实例。必须确认唯一客户端可执行文件是当前工作区的 `target/debug/pi-hub-desktop`，并保持 Tauri dev 命令会话运行。
+5. **不要用模糊 App 标识验证**：存在或可能存在多实例时，不得仅用显示名称 `Pi Hub Client` 或 bundle identifier 启动、退出或判断版本；优先使用本次产物的绝对 App 路径。避免在“确认已退出”阶段调用会自动启动 App 的 UI 状态读取接口。
+6. **用功能特征验收**：进程路径正确后，还必须打开本次修改对应页面，检查至少一个只有当前代码才具备的 UI/行为特征。涉及 Rust 后端时，应实际调用对应只读命令并核对结果，不能只看窗口成功打开。
+7. **如实记录运行来源**：交付说明必须写清实际启动的是 `tauri dev`、debug bundle 还是 release bundle，并记录未验证的其他产物。不得把“新产物已构建”表述为“正在运行的客户端已更新”。
 
 不得为了让检查通过而：
 
@@ -720,5 +742,6 @@ npm run tauri ios build
 - 新行为有对应测试。
 - 相关文档已更新。
 - 所执行和未执行的检查均被如实记录。
+- macOS UI 验收已确认客户端的绝对进程/产物路径，且不存在会混淆结果的旧实例。
 
 若 Tauri、`russh`、WKWebView、Keychain、进程组或 Pi Hub Doctor 契约存在技术阻塞，先提交可复现结论和替代方案，不得伪造完成状态。

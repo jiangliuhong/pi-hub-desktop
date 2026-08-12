@@ -21,6 +21,7 @@ use security_framework::passwords::{
 
 /// Keychain-backed store. All items share the fixed `service` (bundle id);
 /// `account` disambiguates credential id + kind.
+#[derive(Default)]
 pub struct AppleKeychainStore;
 
 impl AppleKeychainStore {

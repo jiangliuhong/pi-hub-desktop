@@ -727,7 +727,7 @@ mod tests {
         make_executable(&node_path);
         let runner = std::sync::Arc::new(FakeRunner::new());
         runner.set(
-            &node_path,
+            &std::fs::canonicalize(&node_path).unwrap(),
             CommandOutput {
                 exit_code: Some(0),
                 stdout: "v24.19.0\n".into(),
@@ -752,7 +752,7 @@ mod tests {
         make_executable(&node_path);
         let runner = std::sync::Arc::new(FakeRunner::new());
         runner.set(
-            &node_path,
+            &std::fs::canonicalize(&node_path).unwrap(),
             CommandOutput {
                 exit_code: Some(0),
                 stdout: "v18.0.0\n".into(),
@@ -795,7 +795,7 @@ mod tests {
         make_executable(&node_path);
         let runner = std::sync::Arc::new(FakeRunner::new());
         runner.set(
-            &node_path,
+            &std::fs::canonicalize(&node_path).unwrap(),
             CommandOutput {
                 exit_code: Some(0),
                 stdout: "v24.19.0\n".into(),
@@ -851,7 +851,7 @@ mod tests {
         make_executable(&node_path);
         let runner = std::sync::Arc::new(FakeRunner::new());
         runner.set(
-            &node_path,
+            &std::fs::canonicalize(&node_path).unwrap(),
             CommandOutput {
                 exit_code: Some(0),
                 stdout: "v24.19.0\n".into(),

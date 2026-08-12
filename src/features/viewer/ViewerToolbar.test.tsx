@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ViewerToolbar } from "./ViewerToolbar";
@@ -8,14 +14,25 @@ const mocks = vi.hoisted(() => ({
   getConnectionStatus: vi.fn(),
   openServiceView: vi.fn(),
   closeServiceView: vi.fn(),
+  // Captures the state-changed listener registered by ViewerToolbar so a test
+  // can simulate an SSH reconnect event (plan §5.5.4).
+  stateChangedHandler: null as ((e: { payload: unknown }) => void) | null,
 }));
 
 vi.mock("../connection/api", () => ({
   getConnectionStatus: mocks.getConnectionStatus,
+  STATE_CHANGED_EVENT: "connection://state-changed",
 }));
 vi.mock("./api", () => ({
   openServiceView: mocks.openServiceView,
   closeServiceView: mocks.closeServiceView,
+}));
+vi.mock("@tauri-apps/api/event", () => ({
+  // listen captures the handler; returns an unlisten stub.
+  listen: (_event: string, handler: (e: { payload: unknown }) => void) => {
+    mocks.stateChangedHandler = handler;
+    return Promise.resolve(vi.fn());
+  },
 }));
 
 describe("ViewerToolbar", () => {
@@ -93,6 +110,54 @@ describe("ViewerToolbar", () => {
     dispatchReturnEvent(frame, "https://attacker.example");
 
     expect(mocks.closeServiceView).not.toHaveBeenCalled();
+  });
+
+  it("reloads onto a new effective URL when SSH reconnects (plan §5.5.4)", async () => {
+    renderViewer();
+    const frame = await screen.findByTitle<HTMLIFrameElement>("Pi Hub");
+    expect(frame).toHaveAttribute("src", "https://pi.example.com/");
+
+    // Simulate the Rust manager emitting a state-changed event after an SSH
+    // reconnect, with a new loopback effective URL.
+    expect(mocks.stateChangedHandler).not.toBeNull();
+    act(() => {
+      mocks.stateChangedHandler!({
+        payload: {
+          service_id: "service-1",
+          state: "connected",
+          effective_url: "http://127.0.0.1:54321/",
+        },
+      });
+    });
+
+    // The iframe must switch to the new URL (declarative reload) and
+    // openServiceView must be re-invoked to register the new allowed origin.
+    await waitFor(() =>
+      expect(frame).toHaveAttribute("src", "http://127.0.0.1:54321/"),
+    );
+    expect(mocks.openServiceView).toHaveBeenCalledWith(
+      "service-1",
+      "http://127.0.0.1:54321/",
+    );
+  });
+
+  it("ignores state-changed events for a different service", async () => {
+    renderViewer();
+    const frame = await screen.findByTitle<HTMLIFrameElement>("Pi Hub");
+
+    mocks.stateChangedHandler!({
+      payload: {
+        service_id: "other-service",
+        state: "connected",
+        effective_url: "http://127.0.0.1:9999/",
+      },
+    });
+
+    expect(frame).toHaveAttribute("src", "https://pi.example.com/");
+    expect(mocks.openServiceView).not.toHaveBeenCalledWith(
+      "service-1",
+      "http://127.0.0.1:9999/",
+    );
   });
 });
 

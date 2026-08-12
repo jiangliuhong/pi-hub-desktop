@@ -29,7 +29,7 @@ use crate::package_management::release_client::ReleaseClient;
 use crate::package_management::verifier::{PostInstallVerifier, VerifiedInstall};
 use chrono::Utc;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -276,8 +276,14 @@ impl PackageManagementManager {
         }
     }
 
-    /// Refresh local detection + prerequisites, rebuild the snapshot (Phase 1).
-    pub async fn scan(&self) -> Result<PackageManagementSnapshot, PackageManagementError> {
+    /// Refresh local detection + prerequisites for a card action (Phase 1).
+    /// Node/npm discovery is shared infrastructure, so the resulting snapshot
+    /// remains globally consistent even though the initiating product is
+    /// explicit at the command boundary.
+    pub async fn scan(
+        &self,
+        _product: ProductId,
+    ) -> Result<PackageManagementSnapshot, PackageManagementError> {
         let Some(svc) = &self.services else {
             return Err(Self::unsupported());
         };
@@ -295,10 +301,20 @@ impl PackageManagementManager {
         Ok(snap)
     }
 
-    /// Check stable releases for both products, mint opaque tokens, rebuild
-    /// (design §9). `force` bypasses the cache TTL.
-    pub async fn check_updates(
+    /// Check the stable release for one product. The product enum is the only
+    /// frontend-controlled input; package names and registry URLs remain fixed
+    /// in the backend.
+    pub async fn check_product_update(
         &self,
+        product: ProductId,
+        force: bool,
+    ) -> Result<PackageManagementSnapshot, PackageManagementError> {
+        self.check_updates_for(&[product], force).await
+    }
+
+    async fn check_updates_for(
+        &self,
+        products: &[ProductId],
         force: bool,
     ) -> Result<PackageManagementSnapshot, PackageManagementError> {
         let Some(svc) = &self.services else {
@@ -307,15 +323,17 @@ impl PackageManagementManager {
         // Mark checking.
         {
             let mut snap = self.snapshot.write().await;
-            for p in snap.products.iter_mut() {
-                p.update_status = UpdateStatus::Checking;
+            for status in snap.products.iter_mut() {
+                if products.contains(&status.product) {
+                    status.update_status = UpdateStatus::Checking;
+                }
             }
             let cloned = snap.clone();
             drop(snap);
             self.broadcast_status(&cloned).await;
         }
         let now = Utc::now();
-        for product in ProductId::all() {
+        for product in products {
             match svc.release_client.latest(*product, force).await {
                 Ok(info) => {
                     let token = ReleaseToken::new(info);
@@ -445,92 +463,63 @@ impl PackageManagementManager {
         // 3. Prerequisites.
         let (node, npm) = self.prereqs_pair(&svc).await?;
         let node_install = node.ok_or(PackageManagementError::NodeUnavailable)?;
-        let _ = npm.ok_or(PackageManagementError::NpmUnavailable)?;
+        let toolchain = npm.ok_or(PackageManagementError::NpmUnavailable)?;
 
-        // 4. Staging.
-        let staging = svc.store.create_staging(product, handle.id).await?;
-        handle.log.push(
-            PackageOperationStage::Preparing,
-            PackageLogLevel::Info,
-            "staging created",
-        );
-
-        // 5. Install.
+        // 4. Install into the selected npm toolchain's global prefix. The
+        // package name and exact version remain backend-controlled.
         handle.set_stage(PackageOperationStage::Installing);
         self.emit_op(&handle).await;
         let spec = InstallSpec {
             product,
             version: token.version.clone(),
-            toolchain: NpmToolchain {
-                node_executable: node_install.canonical_executable.clone(),
-                npm_cli_js: self.resolve_npm_cli(&svc, &node_install).await?.npm_cli_js,
-                npm_version: String::new(),
-                source: node_install.source,
-            },
-            staging_dir: staging.clone(),
+            target_prefix: toolchain.global_prefix.clone(),
+            toolchain: toolchain.clone(),
             cancel: handle.cancel.clone(),
             deadline: crate::package_management::installer::DEFAULT_INSTALL_DEADLINE,
         };
-        if let Err(e) = svc.installer.install(spec, handle.log.clone()).await {
-            svc.store.remove_staging(&staging).await;
-            return Err(e);
-        }
+        svc.installer.install(spec, handle.log.clone()).await?;
 
-        // 6. Verify.
+        // 5. Verify the installed npm-global package.
         handle.set_stage(PackageOperationStage::Verifying);
         self.emit_op(&handle).await;
-        let verified: VerifiedInstall = match svc
+        let verified: VerifiedInstall = svc
             .verifier
             .verify(
                 product,
                 token.version.clone(),
-                &staging,
+                &toolchain.global_root,
                 &node_install.canonical_executable,
             )
-            .await
-        {
-            Ok(v) => v,
-            Err(e) => {
-                svc.store.remove_staging(&staging).await;
-                return Err(e);
-            }
-        };
+            .await?;
 
-        // 7. Promote (activates manifest, retains previous for rollback).
+        // 6. Point the local runtime at the verified global Pi Hub package.
         handle.set_stage(PackageOperationStage::Activating);
         self.emit_op(&handle).await;
-        let entry = svc
-            .store
-            .promote(
-                product,
-                &staging,
-                &token.version,
-                verified.entrypoint.clone(),
-                node_install.canonical_executable.clone(),
-            )
-            .await?;
+        let entry = ActiveEntry {
+            product: product.api_name().into(),
+            version: verified.version.to_string(),
+            package_root: verified.package_root,
+            entrypoint: verified.entrypoint,
+            package_name: package_name(product).into(),
+            bin: bin_name(product).into(),
+            node_executable: node_install.canonical_executable.clone(),
+            activated_at: Utc::now(),
+        };
         handle.log.push(
             PackageOperationStage::Activating,
             PackageLogLevel::Info,
-            &format!("activated {} {}", entry.package_name, entry.version),
+            &format!(
+                "verified npm global package {} {}",
+                entry.package_name, entry.version
+            ),
         );
 
         // 8. Product-specific activation policy.
         if product == ProductId::PiHub {
-            match self.pihub_activation_policy(&svc, &handle, &entry).await? {
-                ActivationPolicy::Parked => {
-                    // Slot stays held; stage remains AwaitingRestartConfirmation.
-                    let dto = handle.to_dto();
-                    self.emit_op(&handle).await;
-                    let _ = self.scan_internal_quiet(&svc).await;
-                    return Ok(dto);
-                }
-                ActivationPolicy::AutoCompleted => {}
-            }
+            self.pihub_activation_policy(&svc, &handle, &entry).await?;
         }
 
-        // Done. Clean up old versions, release slot, mark completed.
-        svc.store.cleanup_versions(product).await;
+        // Done. Release slot and refresh the npm-global snapshot.
         handle.set_stage(PackageOperationStage::Completed);
         let dto = handle.to_dto();
         self.set_op(None).await;
@@ -548,36 +537,41 @@ impl PackageManagementManager {
         svc: &Arc<Services>,
         handle: &Arc<OperationHandle>,
         entry: &ActiveEntry,
-    ) -> Result<ActivationPolicy, PackageManagementError> {
+    ) -> Result<(), PackageManagementError> {
         let Some(port) = &svc.pi_hub_port else {
-            return Ok(ActivationPolicy::AutoCompleted);
+            return Ok(());
         };
         let state = port.runtime_state().await;
         match state {
             LocalRuntimeState::RunningManaged => {
-                // Park until the user confirms "update and restart".
-                handle.set_stage(PackageOperationStage::AwaitingRestartConfirmation);
+                // The UI already performs a high-risk confirmation before an
+                // update. Restart only the process owned by this manager.
+                handle.set_stage(PackageOperationStage::Restarting);
                 self.emit_op(handle).await;
-                Ok(ActivationPolicy::Parked)
+                port.stop().await?;
+                port.apply_pi_hub_paths(entry).await?;
+                port.start().await?;
+                Ok(())
             }
             LocalRuntimeState::RunningExternal => {
-                // Do not stop the external process. Promote is done; the user
-                // can activate the managed copy later via `activate`.
+                // Do not stop the external process. npm has updated the global
+                // package, and the external process remains outside our
+                // ownership boundary.
                 handle.log.push(
                     PackageOperationStage::Completed,
                     PackageLogLevel::Info,
-                    "external Pi Hub running; managed copy ready, activation deferred",
+                    "external Pi Hub running; global package updated without stopping it",
                 );
-                Ok(ActivationPolicy::AutoCompleted)
+                Ok(())
             }
             LocalRuntimeState::Stopped
             | LocalRuntimeState::Failed
             | LocalRuntimeState::PortConflict
             | LocalRuntimeState::Unknown => {
-                // Repoint settings to the managed install. Do not auto-start
-                // (design §6.4: don't default-start Pi Hub after install).
+                // Repoint settings to the verified npm-global install. Do not
+                // auto-start after a first install.
                 port.apply_pi_hub_paths(entry).await?;
-                Ok(ActivationPolicy::AutoCompleted)
+                Ok(())
             }
             LocalRuntimeState::Starting
             | LocalRuntimeState::Stopping
@@ -773,7 +767,7 @@ impl PackageManagementManager {
         Vec::new()
     }
 
-    /// App-exit hook: cancel + bounded-wait any in-flight op, clean staging.
+    /// App-exit hook: cancel + bounded-wait any in-flight npm operation.
     pub async fn on_app_exit(&self) {
         let handle = self.op.lock().await.clone();
         if let Some(h) = &handle {
@@ -784,9 +778,6 @@ impl PackageManagementManager {
         if let Some(h) = &handle {
             // Bound the wait so a stuck npm can't hang exit.
             let _ = tokio::time::timeout(EXIT_CANCEL_WAIT, h.cancel.cancelled()).await;
-        }
-        if let Some(svc) = &self.services {
-            svc.store.cleanup_stale_staging(Utc::now()).await;
         }
     }
 
@@ -873,14 +864,6 @@ impl PackageManagementManager {
             None
         };
         Ok((node, npm))
-    }
-
-    async fn resolve_npm_cli(
-        &self,
-        svc: &Services,
-        node: &NodeInstallation,
-    ) -> Result<NpmToolchain, PackageManagementError> {
-        svc.npm_detector.detect(node).await
     }
 
     async fn build_prereqs(&self, set: &InstallationSet) -> PackagePrerequisites {
@@ -981,14 +964,21 @@ impl PackageManagementManager {
         set: &InstallationSet,
         prereqs: &PackagePrerequisites,
     ) -> ProductStatus {
-        let managed = match &self.services {
-            Some(s) => s.store.active(product).await,
-            None => None,
-        };
-
-        let (install_state, current, alternatives) = match product {
-            ProductId::Pi => self.build_pi_status(set, &managed).await,
-            ProductId::PiHub => self.build_pihub_status(set, &managed).await,
+        let detected = self.global_npm_installation(product, set).await;
+        let (install_state, current, alternatives, issue) = match detected {
+            Ok(Some(current)) => (
+                ProductInstallState::Installed,
+                Some(current),
+                Vec::new(),
+                None,
+            ),
+            Ok(None) => (ProductInstallState::NotInstalled, None, Vec::new(), None),
+            Err(err) => (
+                install_state_for_detection_error(&err),
+                None,
+                Vec::new(),
+                Some(issue_from_error(&err)),
+            ),
         };
 
         // Update status from cached token, if any.
@@ -1015,8 +1005,8 @@ impl PackageManagementManager {
             update_status,
             release_token.is_some(),
             prereqs.node.satisfied && prereqs.npm.satisfied,
-            managed.is_some(),
-            current.as_ref().map(|c| c.ownership) == Some(InstallOwnership::External),
+            false,
+            false,
             pi_hub_state,
             self.op
                 .lock()
@@ -1035,77 +1025,71 @@ impl PackageManagementManager {
             last_update_check_at: None,
             release_token,
             allowed_actions: allowed,
-            issue: None,
+            issue,
         }
     }
 
-    async fn build_pi_status(
+    async fn global_npm_installation(
         &self,
+        product: ProductId,
         set: &InstallationSet,
-        managed: &Option<ActiveEntry>,
-    ) -> (
-        ProductInstallState,
-        Option<ProductInstallationDto>,
-        Vec<ProductInstallationDto>,
-    ) {
-        let mut alts = Vec::new();
-        let mut current: Option<ProductInstallationDto> = None;
-        let mut state = ProductInstallState::NotInstalled;
-
-        if let Some(m) = managed {
-            current = Some(active_entry_to_dto(m));
-            state = ProductInstallState::Installed;
+    ) -> Result<Option<ProductInstallationDto>, PackageManagementError> {
+        let Some(node) = &set.node else {
+            return Ok(None);
+        };
+        let Some(svc) = &self.services else {
+            return Ok(None);
+        };
+        let toolchain = svc.npm_detector.detect(node).await?;
+        let package_root = toolchain.global_root.join(package_name(product));
+        if !package_root.exists() {
+            return Ok(None);
         }
-        if let Some(cli) = &set.pi_cli {
-            let ext = strengthen_pi(cli);
-            if current.is_none() {
-                current = Some(ext);
-                state = ProductInstallState::Installed;
-            } else {
-                alts.push(ext);
+        let raw = std::fs::read_to_string(package_root.join("package.json")).map_err(|_| {
+            PackageManagementError::VerificationFailed {
+                product: product.api_name().into(),
+                reason: "npm global package.json missing".into(),
             }
+        })?;
+        let json: serde_json::Value =
+            serde_json::from_str(&raw).map_err(|_| PackageManagementError::VerificationFailed {
+                product: product.api_name().into(),
+                reason: "npm global package.json invalid".into(),
+            })?;
+        if json.get("name").and_then(|value| value.as_str()) != Some(package_name(product)) {
+            return Err(PackageManagementError::VerificationFailed {
+                product: product.api_name().into(),
+                reason: "npm global package identity mismatch".into(),
+            });
         }
-        (state, current, alts)
-    }
-
-    async fn build_pihub_status(
-        &self,
-        set: &InstallationSet,
-        managed: &Option<ActiveEntry>,
-    ) -> (
-        ProductInstallState,
-        Option<ProductInstallationDto>,
-        Vec<ProductInstallationDto>,
-    ) {
-        let mut alts = Vec::new();
-        let mut current: Option<ProductInstallationDto> = None;
-        let mut state = ProductInstallState::NotInstalled;
-
-        if let Some(m) = managed {
-            current = Some(active_entry_to_dto(m));
-            state = ProductInstallState::Installed;
-        }
-        if let Some(ph) = &set.pi_hub {
-            let canon_entry = ph.entrypoint.clone();
-            let ext = ProductInstallationDto {
-                installation_id: installation_id_from_path(&canon_entry),
-                package_name: "@jarome/pi-hub".into(),
-                version: Some(ph.version.clone()),
-                executable: None,
-                package_root: Some(ph.package_root.clone()),
-                entrypoint: Some(canon_entry),
-                source: ph.source,
-                ownership: InstallOwnership::External,
-                kind: Some(PackageKind::Npm),
-            };
-            if current.is_none() {
-                current = Some(ext);
-                state = ProductInstallState::Installed;
-            } else {
-                alts.push(ext);
-            }
-        }
-        (state, current, alts)
+        let version = json
+            .get("version")
+            .and_then(|value| value.as_str())
+            .and_then(|value| semver::Version::parse(value).ok())
+            .ok_or_else(|| PackageManagementError::VerificationFailed {
+                product: product.api_name().into(),
+                reason: "npm global package version invalid".into(),
+            })?;
+        let verified = svc
+            .verifier
+            .verify(
+                product,
+                version,
+                &toolchain.global_root,
+                &node.canonical_executable,
+            )
+            .await?;
+        Ok(Some(ProductInstallationDto {
+            installation_id: installation_id_from_path(&verified.entrypoint),
+            package_name: package_name(product).into(),
+            version: Some(verified.version.to_string()),
+            executable: Some(verified.entrypoint.clone()),
+            package_root: Some(verified.package_root),
+            entrypoint: Some(verified.entrypoint),
+            source: InstallationSource::NpmGlobal,
+            ownership: InstallOwnership::External,
+            kind: Some(PackageKind::Npm),
+        }))
     }
 
     async fn update_state(
@@ -1158,10 +1142,15 @@ impl PackageManagementManager {
     }
 }
 
-/// Outcome of the Pi Hub activation policy.
-enum ActivationPolicy {
-    AutoCompleted,
-    Parked,
+fn install_state_for_detection_error(err: &PackageManagementError) -> ProductInstallState {
+    match err {
+        // A missing prerequisite means the product could not be inspected. It
+        // is not evidence that the package itself is damaged.
+        PackageManagementError::NodeUnavailable | PackageManagementError::NpmUnavailable => {
+            ProductInstallState::Unknown
+        }
+        _ => ProductInstallState::Invalid,
+    }
 }
 
 /// Async helper to fetch a managed active entry off a service handle without
@@ -1169,76 +1158,6 @@ enum ActivationPolicy {
 #[allow(dead_code)]
 async fn futures_lookup_active(svc: &Arc<Services>, product: ProductId) -> Option<ActiveEntry> {
     svc.store.active(product).await
-}
-
-/// Convert a PiCliInstallation into a strengthened ProductInstallationDto,
-/// classifying npm vs standalone by locating an adjacent package.json
-/// (design §8.3).
-fn strengthen_pi(cli: &crate::local_runtime::model::PiCliInstallation) -> ProductInstallationDto {
-    let exe = cli.executable.clone();
-    let (pkg_root, kind) = locate_pi_package(&exe);
-    let package_name = "@earendil-works/pi-coding-agent".to_string();
-    let version = if let Some(root) = &pkg_root {
-        read_pkg_version(root).or_else(|| cli.version.clone())
-    } else {
-        cli.version.clone()
-    };
-    ProductInstallationDto {
-        installation_id: installation_id_from_path(&exe),
-        package_name,
-        version,
-        executable: Some(exe.clone()),
-        package_root: pkg_root,
-        entrypoint: Some(exe),
-        source: cli.source,
-        ownership: InstallOwnership::External,
-        kind: Some(kind),
-    }
-}
-
-/// Walk up from a `pi` binary to find a package.json declaring the pi package.
-fn locate_pi_package(exe: &Path) -> (Option<PathBuf>, PackageKind) {
-    let Some(mut dir) = exe.parent().map(PathBuf::from) else {
-        return (None, PackageKind::Standalone);
-    };
-    for _ in 0..8 {
-        let pkg = dir.join("package.json");
-        if let Ok(raw) = std::fs::read_to_string(&pkg) {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
-                if v.get("name").and_then(|n| n.as_str()) == Some("@earendil-works/pi-coding-agent")
-                {
-                    return (Some(dir.clone()), PackageKind::Npm);
-                }
-            }
-        }
-        dir = match dir.parent().map(PathBuf::from) {
-            Some(p) => p,
-            None => break,
-        };
-    }
-    (None, PackageKind::Standalone)
-}
-
-fn read_pkg_version(root: &Path) -> Option<String> {
-    let raw = std::fs::read_to_string(root.join("package.json")).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    v.get("version")
-        .and_then(|n| n.as_str())
-        .map(|s| s.to_string())
-}
-
-fn active_entry_to_dto(entry: &ActiveEntry) -> ProductInstallationDto {
-    ProductInstallationDto {
-        installation_id: installation_id_from_path(&entry.entrypoint),
-        package_name: entry.package_name.clone(),
-        version: Some(entry.version.clone()),
-        executable: None,
-        package_root: Some(entry.package_root.clone()),
-        entrypoint: Some(entry.entrypoint.clone()),
-        source: InstallationSource::DesktopManaged,
-        ownership: InstallOwnership::DesktopManaged,
-        kind: Some(PackageKind::Npm),
-    }
 }
 
 fn hints_from_settings(
@@ -1394,7 +1313,7 @@ pub mod test_support {
         ) -> Result<crate::package_management::installer::InstallOutcome, PackageManagementError>
         {
             let pkg = package_name(spec.product);
-            let root = spec.staging_dir.join("node_modules").join(pkg);
+            let root = spec.target_prefix.join("node_modules").join(pkg);
             tokio::fs::create_dir_all(root.join("bin")).await.ok();
             tokio::fs::write(
                 root.join("bin").join(bin_name(spec.product)),
@@ -1403,7 +1322,7 @@ pub mod test_support {
             .await
             .ok();
             Ok(crate::package_management::installer::InstallOutcome {
-                staging_dir: spec.staging_dir,
+                target_prefix: spec.target_prefix,
             })
         }
     }
@@ -1411,6 +1330,7 @@ pub mod test_support {
     /// A fake npm detector returning a preset toolchain.
     pub struct FakeNpmDetector {
         pub ok: bool,
+        pub global_prefix: PathBuf,
     }
     #[async_trait::async_trait]
     impl NpmToolchainDetector for FakeNpmDetector {
@@ -1424,6 +1344,8 @@ pub mod test_support {
                     npm_cli_js: PathBuf::from("/fake/npm-cli.js"),
                     npm_version: "10.8.2".into(),
                     source: node.source,
+                    global_prefix: self.global_prefix.clone(),
+                    global_root: self.global_prefix.join("lib/node_modules"),
                 })
             } else {
                 Err(PackageManagementError::NpmUnavailable)
@@ -1529,21 +1451,18 @@ mod tests {
     }
 
     #[test]
-    fn strengthen_pi_classifies_npm_when_package_json_present() {
-        let dir = tempfile::tempdir().unwrap();
-        let pkg_dir = dir.path().join("@earendil-works/pi-coding-agent");
-        let bin_dir = pkg_dir.join("bin");
-        std::fs::create_dir_all(&bin_dir).unwrap();
-        std::fs::write(
-            pkg_dir.join("package.json"),
-            r#"{"name":"@earendil-works/pi-coding-agent","version":"0.84.0"}"#,
-        )
-        .unwrap();
-        let exe = bin_dir.join("pi");
-        std::fs::write(&exe, "#!/bin/sh\n").unwrap();
-        let (root, kind) = locate_pi_package(&exe);
-        assert_eq!(kind, PackageKind::Npm);
-        assert!(root.is_some());
+    fn unavailable_npm_does_not_mark_product_invalid() {
+        assert_eq!(
+            install_state_for_detection_error(&PackageManagementError::NpmUnavailable),
+            ProductInstallState::Unknown
+        );
+        assert_eq!(
+            install_state_for_detection_error(&PackageManagementError::VerificationFailed {
+                product: "pi".into(),
+                reason: "package identity mismatch".into(),
+            }),
+            ProductInstallState::Invalid
+        );
     }
 
     #[tokio::test]
@@ -1610,7 +1529,10 @@ mod tests {
                     published_at: None,
                 }),
             }),
-            npm_detector: Arc::new(test_support::FakeNpmDetector { ok: true }),
+            npm_detector: Arc::new(test_support::FakeNpmDetector {
+                ok: true,
+                global_prefix: dir.path().join("npm-global"),
+            }),
             installer: Arc::new(test_support::FakeInstaller),
             verifier: Arc::new(test_support::OkVerifier),
             store: store.clone(),
@@ -1622,8 +1544,10 @@ mod tests {
             Arc::new(NoopBroadcaster),
         ));
 
-        // Mint a token via check_updates.
-        mgr.check_updates(false).await.unwrap();
+        // A card-level check only mints a token for the selected product.
+        mgr.check_product_update(ProductId::Pi, false)
+            .await
+            .unwrap();
         let snap = mgr.snapshot().await;
         let pi = snap
             .products
@@ -1631,14 +1555,24 @@ mod tests {
             .find(|p| p.product == ProductId::Pi)
             .unwrap();
         let token = pi.release_token.clone().expect("token minted");
+        let pi_hub = snap
+            .products
+            .iter()
+            .find(|p| p.product == ProductId::PiHub)
+            .unwrap();
+        assert!(pi_hub.release_token.is_none());
 
         let dto = mgr.start_install(ProductId::Pi, token).await.unwrap();
         assert_eq!(dto.stage, PackageOperationStage::Completed);
         assert_eq!(dto.target_version.as_deref(), Some("0.84.0"));
 
-        // The managed active is now set.
-        let active = store.active(ProductId::Pi).await.unwrap();
-        assert_eq!(active.version, "0.84.0");
+        // The package was written to the selected npm global prefix; no
+        // Desktop-managed active manifest is created.
+        assert!(dir
+            .path()
+            .join("npm-global/node_modules/@earendil-works/pi-coding-agent")
+            .is_dir());
+        assert!(store.active(ProductId::Pi).await.is_none());
         // No operation in flight anymore.
         assert!(mgr.op.lock().await.is_none());
     }

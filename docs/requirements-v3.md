@@ -9,6 +9,23 @@
 - 关联设计：`docs/pi-and-pi-hub-package-management-design.md`
 - 状态：规划基线
 
+## 0.1 设计决策：npm 全局安装模式（2026-08-12）
+
+本节覆盖本文后续仍提到 Desktop 受管副本、staging manifest、外部安装只读等旧表述：
+
+- “Pi Hub Installation” 页面只检测当前选定 Node.js 所配套 npm 的 `npm root --global`；PATH 中的 standalone、手动路径、其他 Node 版本或非全局 npm 包不计为已安装。
+- Pi 固定包为 `@earendil-works/pi-coding-agent`，Pi Hub 固定包为 `@jarome/pi-hub`。检测必须验证 package identity、version、bin、Node engine 与版本命令。
+- 安装/升级使用绝对 Node.js 与绝对 `npm-cli.js`，等价于 `npm install --global --prefix <validated-global-prefix> ... <allowlisted-package>@<exact-version>`；包名、版本、prefix 和参数不能由前端指定。
+- 不请求 `sudo`。npm global prefix 不可写时操作失败并给出修复建议，不自动提权或切换目录。
+- npm 全局写入不承诺 Desktop 私有 staging 的原子切换/manifest 回滚语义。必须在操作后严格验证并如实报告失败。
+- Pi Hub 由当前 Desktop 管理时，升级后通过 `LocalRuntimeManager` 重启；外部 Pi Hub 不由 Desktop 停止或 Kill。
+- 页面继续支持联网检查 stable `latest`，未安装时显示“安装”，旧版本显示“升级”。
+- 产品卡片按当前版本、最新版本、Node.js、npm、命令路径和固定安装/升级命令展示；命令只读且可复制，执行仍使用后端固定参数，不能把展示文本回传为执行输入。
+- npm CLI 候选必须同时从 Node 的发现路径与 canonical 路径推导。Homebrew 等布局中 Node 可解析到 Cellar，但 npm global prefix 仍位于稳定前缀；不得因此误报 npm 不可用。npm 前置检查失败只能表示 `unknown`，不能据此把 Pi / Pi Hub 标记为 `invalid`。
+- 当保存的 Node 路径本身已经是 Homebrew canonical Cellar 路径时，允许从该路径所属的 `Cellar` 反推出同一 Homebrew prefix；不得回退到与当前 Node 无关的固定全局目录。
+- Pi 与 Pi Hub 卡片分别提供“重新扫描”和“检查更新”。命令必须携带固定 `ProductId`；检查 registry 时只请求所选产品，不能由一个卡片按钮同时检查两个产品。
+- 尚未执行首次扫描的初始快照也必须为两张卡片提供上述只读操作，避免因 `allowed_actions` 为空而无法触发首次检测。
+
 ---
 
 ## 1. 版本背景
@@ -557,8 +574,8 @@ V3 合并后必须继续通过 iOS 编译，V1 / V2 功能和测试不退化；�
 
 ```rust
 get_package_management_status()
-scan_managed_products()
-check_product_updates(force: bool)
+scan_managed_products(product: ProductId)
+check_product_updates(product: ProductId, force: bool)
 start_product_install(product: ProductId, release_token: String)
 start_product_update(product: ProductId, release_token: String)
 confirm_pi_hub_update_restart(operation_id: Uuid)

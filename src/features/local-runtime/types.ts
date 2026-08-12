@@ -30,6 +30,7 @@ export type InstallationSource =
   | "asdf"
   | "mise"
   | "manual"
+  | "npm_global"
   | "desktop_managed";
 
 export type CheckCategory =

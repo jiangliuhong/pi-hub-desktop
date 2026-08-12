@@ -3,6 +3,7 @@
 //! Owns the connection state machine and resource lifecycle as the single
 //! source of truth (AGENTS.md §5.3).
 
+pub mod broadcaster;
 pub mod diagnostics;
 pub mod direct;
 pub mod manager;

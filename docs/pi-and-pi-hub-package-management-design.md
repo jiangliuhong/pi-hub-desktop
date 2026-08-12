@@ -27,6 +27,18 @@
 `pi-hub-desktop` 已存在完整的 V2 本机 Runtime 基础：
 
 - `DefaultInstallationDetector` 扫描 App PATH、Homebrew、NVM、Volta、FNM、ASDF、Mise 和用户保存路径；
+
+> **2026-08-12 设计决策（覆盖后续旧受管副本设计）**：包管理页面改为 npm 全局安装模式。页面安装事实只来自当前 Node 配套 npm 的 `prefix --global` / `root --global`；安装与升级使用固定包名和精确版本执行 `install --global --prefix <validated-global-prefix>`。不再为页面创建 Desktop 私有 package staging、active manifest 或受管副本。V2 Runtime 的一般路径发现仍保留给 Runtime/Doctor，但不能作为此页面的 Pi/Pi Hub 已安装依据。npm 全局写入不承诺原子回滚；完成后执行严格验证。Pi Hub managed runtime 升级后由既有 supervisor 重启，external runtime 不停止。
+
+安装页参考系统组件升级面板布局：每个产品显示当前/latest、Node、npm、命令路径，以及后端固定映射生成的只读 npm 全局命令。复制按钮只复制说明文本；安装/升级按钮仍只提交 `ProductId` 与 release token。
+
+npm toolchain 检测保留 Node 的发现路径和 canonical 路径：例如 Homebrew `/opt/homebrew/bin/node` 会解析到 Cellar，但配套 npm 仍可能位于 `/opt/homebrew/lib/node_modules/npm`。候选枚举先使用发现路径恢复稳定 prefix，再用绝对 Node + canonical npm CLI 执行版本、global prefix/root 校验。npm 无法验证时产品状态为 `unknown`，只有包身份、版本或入口验证失败才是 `invalid`。
+
+若 V2 设置中只保留了 `/opt/homebrew/Cellar/node/<version>/bin/node` 形式的 canonical 路径，detector 从该路径实际所属的 `Cellar` 父目录恢复同一 Homebrew prefix。该推导与当前 Node 路径绑定，不使用无条件 `/opt/homebrew` 或 `/usr/local` fallback。
+
+Pi 与 Pi Hub 的“重新扫描”和“检查更新”位于各自产品卡片。前端只传对应 `ProductId`；registry 更新检查只获取该产品，扫描复用共享 Node/npm 探测后刷新快照。
+
+默认快照为每个产品预置 `Scan` 与 `CheckUpdates` 两个只读 allowlist action，确保首次检测前页面仍有操作入口；安装、升级等写操作仍只能由扫描后的真实状态计算。
 - `InstallationSet` 返回 Node.js、Pi Hub 和可选外部 Pi CLI；
 - `LocalRuntimeManager` 维护安装、Doctor、端口探测和进程状态；
 - `LocalRuntimeSettingsPage` 支持手动填写路径、重新扫描和环境检查；
@@ -583,8 +595,8 @@ interface ProductStatus {
 
 ```rust
 get_package_management_status()
-scan_managed_products()
-check_product_updates(force: bool)
+scan_managed_products(product: ProductId)
+check_product_updates(product: ProductId, force: bool)
 start_product_install(product: ProductId, release_token: String)
 start_product_update(product: ProductId, release_token: String)
 confirm_pi_hub_update_restart(operation_id: Uuid)

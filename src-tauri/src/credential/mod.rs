@@ -133,7 +133,7 @@ pub trait CredentialStore: Send + Sync {
 pub fn default_store() -> Box<dyn CredentialStore> {
     #[cfg(target_vendor = "apple")]
     {
-        return Box::new(apple_keychain::AppleKeychainStore::new());
+        Box::new(apple_keychain::AppleKeychainStore::new())
     }
     #[cfg(not(target_vendor = "apple"))]
     {

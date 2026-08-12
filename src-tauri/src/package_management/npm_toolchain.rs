@@ -23,6 +23,10 @@ pub struct NpmToolchain {
     pub npm_cli_js: PathBuf,
     pub npm_version: String,
     pub source: InstallationSource,
+    /// The prefix used by `npm install --global` for this exact toolchain.
+    pub global_prefix: PathBuf,
+    /// The package root reported by `npm root --global`.
+    pub global_root: PathBuf,
 }
 
 /// The detector contract (DI for tests).
@@ -53,7 +57,7 @@ impl NpmToolchainDetector for DefaultNpmToolchainDetector {
         &self,
         node: &NodeInstallation,
     ) -> Result<NpmToolchain, PackageManagementError> {
-        for cand in candidate_npm_cli(&node.canonical_executable) {
+        for cand in candidate_npm_cli(node) {
             let Ok(canon) = std::fs::canonicalize(&cand) else {
                 continue;
             };
@@ -82,6 +86,21 @@ impl NpmToolchainDetector for DefaultNpmToolchainDetector {
                 Some(v) => v,
                 None => continue,
             };
+            let Some(global_prefix) = self
+                .query_global_path(node, &canon, &["prefix", "--global"])
+                .await
+            else {
+                continue;
+            };
+            let Some(global_root) = self
+                .query_global_path(node, &canon, &["root", "--global"])
+                .await
+            else {
+                continue;
+            };
+            if !global_root.starts_with(&global_prefix) {
+                continue;
+            }
             // Containment: the npm-cli.js must live under a node_modules/npm
             // tree, and ideally not escape the node install area. We only
             // accept candidates derived from known layouts (below), so this is
@@ -91,10 +110,58 @@ impl NpmToolchainDetector for DefaultNpmToolchainDetector {
                 npm_cli_js: canon,
                 npm_version: version,
                 source: node.source,
+                global_prefix,
+                global_root,
             });
         }
         Err(PackageManagementError::NpmUnavailable)
     }
+}
+
+impl DefaultNpmToolchainDetector {
+    async fn query_global_path(
+        &self,
+        node: &NodeInstallation,
+        npm_cli: &Path,
+        npm_args: &[&str],
+    ) -> Option<PathBuf> {
+        let mut args = Vec::with_capacity(npm_args.len() + 1);
+        args.push(npm_cli.to_string_lossy().to_string());
+        args.extend(npm_args.iter().map(|arg| (*arg).to_string()));
+        let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+        let out = self
+            .runner
+            .run(&node.canonical_executable, &refs, None, SHORT_TIMEOUT, &[])
+            .await
+            .ok()?;
+        if !matches!(out.exit_code, Some(0)) {
+            return None;
+        }
+        let raw = PathBuf::from(out.stdout.trim());
+        if !raw.is_absolute() {
+            return None;
+        }
+        // The root may not exist before the first global package is installed.
+        // Canonicalize the nearest existing path while preserving the suffix.
+        canonicalize_allow_missing(&raw)
+    }
+}
+
+fn canonicalize_allow_missing(path: &Path) -> Option<PathBuf> {
+    if let Ok(canon) = std::fs::canonicalize(path) {
+        return Some(canon);
+    }
+    let mut missing = Vec::new();
+    let mut cursor = path;
+    while !cursor.exists() {
+        missing.push(cursor.file_name()?.to_os_string());
+        cursor = cursor.parent()?;
+    }
+    let mut resolved = std::fs::canonicalize(cursor).ok()?;
+    for part in missing.into_iter().rev() {
+        resolved.push(part);
+    }
+    Some(resolved)
 }
 
 impl DefaultNpmToolchainDetector {
@@ -105,27 +172,38 @@ impl DefaultNpmToolchainDetector {
     }
 }
 
-/// Build ordered npm-cli.js candidates from a canonical Node path (design
-/// §10). Prefers the same install prefix; falls back to fixed global roots.
-fn candidate_npm_cli(node_canon: &Path) -> Vec<PathBuf> {
+/// Build ordered npm-cli.js candidates from both the discovered Node path and
+/// its canonical target. Keeping the discovered path is required for package
+/// managers such as Homebrew, where `/opt/homebrew/bin/node` resolves into the
+/// Cellar but global npm packages remain under `/opt/homebrew/lib`.
+fn candidate_npm_cli(node: &NodeInstallation) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
-    if let Some(bin) = node_canon.parent() {
-        // Most Unix layouts: <prefix>/bin/node + <prefix>/lib/node_modules/npm
-        out.push(bin.join("../lib/node_modules/npm/bin/npm-cli.js"));
-        // Some layouts ship under <prefix>/node_modules
-        out.push(bin.join("../node_modules/npm/bin/npm-cli.js"));
-        if let Some(root) = bin.parent() {
-            out.push(root.join("lib/node_modules/npm/bin/npm-cli.js"));
-            out.push(root.join("node_modules/npm/bin/npm-cli.js"));
+    for node_path in [&node.executable, &node.canonical_executable] {
+        if let Some(bin) = node_path.parent() {
+            // Most Unix layouts: <prefix>/bin/node + <prefix>/lib/node_modules/npm
+            out.push(bin.join("../lib/node_modules/npm/bin/npm-cli.js"));
+            // Some layouts ship under <prefix>/node_modules.
+            out.push(bin.join("../node_modules/npm/bin/npm-cli.js"));
+            if let Some(root) = bin.parent() {
+                out.push(root.join("lib/node_modules/npm/bin/npm-cli.js"));
+                out.push(root.join("node_modules/npm/bin/npm-cli.js"));
+            }
+        }
+
+        // A persisted Homebrew Node path may already be canonicalized to
+        // `<prefix>/Cellar/node/<version>/bin/node`, losing the stable
+        // `<prefix>/bin/node` discovery path. Recover only the prefix that
+        // owns this exact Cellar tree; do not fall back to unrelated global
+        // roots.
+        if let Some(cellar) = node_path
+            .ancestors()
+            .find(|ancestor| ancestor.file_name().is_some_and(|name| name == "Cellar"))
+        {
+            if let Some(prefix) = cellar.parent() {
+                out.push(prefix.join("lib/node_modules/npm/bin/npm-cli.js"));
+            }
         }
     }
-    // Fixed global roots (Homebrew /usr/local and /opt/homebrew).
-    out.push(PathBuf::from(
-        "/opt/homebrew/lib/node_modules/npm/bin/npm-cli.js",
-    ));
-    out.push(PathBuf::from(
-        "/usr/local/lib/node_modules/npm/bin/npm-cli.js",
-    ));
     dedup_canon(out)
 }
 
@@ -166,6 +244,7 @@ mod tests {
     /// canonicalize step has files to resolve.
     struct FakeRunner {
         npm_version: Option<String>,
+        prefix: PathBuf,
     }
     #[async_trait]
     impl CommandRunner for FakeRunner {
@@ -185,6 +264,24 @@ mod tests {
                 return Ok(CommandOutput {
                     exit_code: Some(0),
                     stdout,
+                    stderr: "".into(),
+                });
+            }
+            if args.contains(&"prefix") {
+                return Ok(CommandOutput {
+                    exit_code: Some(0),
+                    stdout: self.prefix.to_string_lossy().into_owned(),
+                    stderr: "".into(),
+                });
+            }
+            if args.contains(&"root") {
+                return Ok(CommandOutput {
+                    exit_code: Some(0),
+                    stdout: self
+                        .prefix
+                        .join("lib/node_modules")
+                        .to_string_lossy()
+                        .into_owned(),
                     stderr: "".into(),
                 });
             }
@@ -226,11 +323,60 @@ mod tests {
         let node = make_layout(dir.path());
         let det = DefaultNpmToolchainDetector::new(Arc::new(FakeRunner {
             npm_version: Some("10.8.2".into()),
+            prefix: dir.path().to_path_buf(),
         }));
         let tc = det.detect(&node).await.unwrap();
         assert!(tc.npm_cli_js.ends_with("npm-cli.js"));
         assert_eq!(tc.npm_version, "10.8.2");
         assert_eq!(tc.node_executable, node.canonical_executable);
+        assert_eq!(tc.global_prefix, std::fs::canonicalize(dir.path()).unwrap());
+        assert!(tc.global_root.ends_with("lib/node_modules"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn detects_homebrew_npm_from_noncanonical_node_prefix() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let prefix = dir.path().join("homebrew");
+        let cellar = prefix.join("Cellar/node/24.10.0");
+        std::fs::create_dir_all(prefix.join("bin")).unwrap();
+        std::fs::create_dir_all(cellar.join("bin")).unwrap();
+        std::fs::create_dir_all(prefix.join("lib/node_modules/npm/bin")).unwrap();
+        let real_node = cellar.join("bin/node");
+        std::fs::write(&real_node, "#!/bin/sh\n").unwrap();
+        let discovered_node = prefix.join("bin/node");
+        symlink(&real_node, &discovered_node).unwrap();
+        std::fs::write(
+            prefix.join("lib/node_modules/npm/bin/npm-cli.js"),
+            "// npm\n",
+        )
+        .unwrap();
+
+        let node = NodeInstallation {
+            // Simulate the persisted setting seen in a signed/Finder-launched
+            // app: only the canonical Cellar path remains available.
+            executable: real_node.clone(),
+            canonical_executable: std::fs::canonicalize(&real_node).unwrap(),
+            version: "24.10.0".into(),
+            source: InstallationSource::Homebrew,
+        };
+        let det = DefaultNpmToolchainDetector::new(Arc::new(FakeRunner {
+            npm_version: Some("11.6.0".into()),
+            prefix: prefix.clone(),
+        }));
+
+        let toolchain = det.detect(&node).await.unwrap();
+        assert_eq!(toolchain.npm_version, "11.6.0");
+        assert!(toolchain
+            .npm_cli_js
+            .ends_with("lib/node_modules/npm/bin/npm-cli.js"));
+        assert_eq!(
+            toolchain.global_prefix,
+            std::fs::canonicalize(prefix).unwrap()
+        );
+        assert_ne!(node.executable, discovered_node);
     }
 
     #[tokio::test]
@@ -241,6 +387,7 @@ mod tests {
         std::fs::remove_dir_all(dir.path().join("lib")).unwrap();
         let det = DefaultNpmToolchainDetector::new(Arc::new(FakeRunner {
             npm_version: Some("10.8.2".into()),
+            prefix: dir.path().to_path_buf(),
         }));
         assert!(matches!(
             det.detect(&node).await,

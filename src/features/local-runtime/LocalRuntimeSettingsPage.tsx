@@ -3,18 +3,13 @@ import { Link } from "react-router-dom";
 import {
   getLocalRuntimeSettings,
   runLocalEnvironmentDoctor,
-  scanLocalInstallations,
   updateLocalRuntimeSettings,
-  validateLocalInstallation,
 } from "./api";
-import { sourceLabel } from "./labels";
-import type {
-  InstallationSet,
-  LocalRuntimeSettings,
-  LocalRuntimeSettingsUpdate,
-} from "./types";
+import type { LocalRuntimeSettings, LocalRuntimeSettingsUpdate } from "./types";
 import type { AppErrorDto } from "../../lib/tauri";
 import { PagePlaceholder } from "../../components/PagePlaceholder";
+import { PackageManagementSettings } from "../package-management/PackageManagementSettings";
+import { usePackageManagement } from "../package-management/usePackageManagement";
 
 /**
  * Local runtime settings page (requirements-v2 §9 V2-FR-015, §13.2).
@@ -29,8 +24,7 @@ export function LocalRuntimeSettingsPage() {
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const [validating, setValidating] = useState(false);
-  const [validation, setValidation] = useState<InstallationSet | null>(null);
+  const packages = usePackageManagement();
 
   const reload = useCallback(async () => {
     try {
@@ -67,53 +61,6 @@ export function LocalRuntimeSettingsPage() {
     }
   };
 
-  const validate = async () => {
-    setValidating(true);
-    setError(null);
-    setInfo(null);
-    try {
-      const set = await validateLocalInstallation({
-        node_executable: settings.node_executable,
-        pi_hub_entrypoint: settings.pi_hub_entrypoint,
-        pi_hub_package_root: settings.pi_hub_package_root,
-      });
-      setValidation(set);
-      if (set.node && set.pi_hub) {
-        setInfo("所选 Node.js 与 Pi Hub 组合有效。");
-      } else {
-        setError("无法验证所选安装组合，请检查路径。");
-      }
-    } catch (e) {
-      setError(toMessage(e));
-    } finally {
-      setValidating(false);
-    }
-  };
-
-  const rescan = async () => {
-    setSaving(true);
-    setError(null);
-    try {
-      const snap = await scanLocalInstallations();
-      if (snap.installation?.node?.executable) {
-        await apply({
-          node_executable: snap.installation.node.canonical_executable,
-        });
-      }
-      if (snap.installation?.pi_hub) {
-        await apply({
-          pi_hub_entrypoint: snap.installation.pi_hub.entrypoint,
-          pi_hub_package_root: snap.installation.pi_hub.package_root,
-        });
-      }
-      setInfo("已重新扫描并应用可用安装。");
-    } catch (e) {
-      setError(toMessage(e));
-    } finally {
-      setSaving(false);
-    }
-  };
-
   const recheck = async () => {
     setSaving(true);
     setError(null);
@@ -129,7 +76,17 @@ export function LocalRuntimeSettingsPage() {
 
   return (
     <div className="local-runtime-settings">
-      <h2>Pi Hub Installation</h2>
+      <h2>本机组件</h2>
+
+      {packages.supported ? (
+        <PackageManagementSettings
+          snapshot={packages.snapshot}
+          loading={packages.loading}
+          actions={packages.actions}
+          error={packages.error}
+          errorProduct={packages.errorProduct}
+        />
+      ) : null}
 
       {error ? (
         <div role="alert" className="error-banner">
@@ -137,57 +94,6 @@ export function LocalRuntimeSettingsPage() {
         </div>
       ) : null}
       {info ? <div className="info-banner">{info}</div> : null}
-
-      <label className="field">
-        <span>Node.js</span>
-        <input
-          type="text"
-          value={settings.node_executable ?? ""}
-          placeholder="例如 /opt/homebrew/bin/node"
-          onChange={(e) =>
-            setSettings({ ...settings, node_executable: e.target.value })
-          }
-          onBlur={(e) => void apply({ node_executable: e.target.value })}
-          disabled={saving}
-        />
-        {validation?.node ? (
-          <small>
-            验证通过：v{validation.node.version}（
-            {sourceLabel(validation.node.source)}）
-          </small>
-        ) : null}
-      </label>
-
-      <label className="field">
-        <span>Pi Hub 入口</span>
-        <input
-          type="text"
-          value={settings.pi_hub_entrypoint ?? ""}
-          placeholder="例如 /usr/local/lib/node_modules/@jarome/pi-hub/bin/pi-hub.js"
-          onChange={(e) =>
-            setSettings({ ...settings, pi_hub_entrypoint: e.target.value })
-          }
-          onBlur={(e) => void apply({ pi_hub_entrypoint: e.target.value })}
-          disabled={saving}
-        />
-      </label>
-
-      <label className="field">
-        <span>Pi Hub 安装根目录</span>
-        <input
-          type="text"
-          value={settings.pi_hub_package_root ?? ""}
-          placeholder="Pi Hub package root"
-          onChange={(e) =>
-            setSettings({ ...settings, pi_hub_package_root: e.target.value })
-          }
-          onBlur={(e) => void apply({ pi_hub_package_root: e.target.value })}
-          disabled={saving}
-        />
-        {validation?.pi_hub ? (
-          <small>验证通过：v{validation.pi_hub.version}</small>
-        ) : null}
-      </label>
 
       <label className="field">
         <span>Pi Agent 数据目录（可选）</span>
@@ -243,16 +149,6 @@ export function LocalRuntimeSettingsPage() {
       </label>
 
       <div className="local-runtime-actions">
-        <button
-          type="button"
-          onClick={() => void validate()}
-          disabled={validating}
-        >
-          {validating ? "验证中…" : "验证所选安装"}
-        </button>
-        <button type="button" onClick={() => void rescan()} disabled={saving}>
-          重新扫描
-        </button>
         <button type="button" onClick={() => void recheck()} disabled={saving}>
           重新检查环境
         </button>

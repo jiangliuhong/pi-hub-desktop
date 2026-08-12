@@ -38,6 +38,10 @@ const READY_POLL_MAX: Duration = Duration::from_secs(1);
 const START_TIMEOUT: Duration = Duration::from_secs(30);
 /// Graceful stop window before SIGKILL (design-v2 §13.1, NFR-002).
 const GRACEFUL_STOP: Duration = Duration::from_secs(5);
+/// A child process can exit before Next.js has finished closing its listener.
+/// Keep the card in `stopping` until the service is actually unreachable.
+const STOP_RELEASE_TIMEOUT: Duration = Duration::from_secs(8);
+const STOP_RELEASE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// Doctor result freshness before a start re-runs required checks (§8.5).
 const DOCTOR_FRESH_SECS: i64 = 60;
 
@@ -402,8 +406,19 @@ impl LocalRuntimeManager {
             settings: settings.clone(),
         };
         let report = svc.doctor.diagnose(&ctx).await?;
-        self.patch_snapshot(|s| s.environment = report.clone())
-            .await;
+        self.patch_snapshot(|s| {
+            s.environment = report.clone();
+            if report.overall != EnvironmentStatus::Blocked
+                && matches!(
+                    s.last_error.as_ref(),
+                    Some(last)
+                        if last.code == crate::error::ErrorCode::PiHubDoctorBlocked
+                )
+            {
+                s.last_error = None;
+            }
+        })
+        .await;
         Ok(report)
     }
 
@@ -462,6 +477,9 @@ impl LocalRuntimeManager {
             .await?;
         if let Some(report) = blocked {
             let err = LocalRuntimeError::DoctorBlocked(report.overall.api_name().into());
+            // The structured report was persisted by `required_doctor_blocked`.
+            // Keep Doctor failures out of `recentOutput`, which is reserved for
+            // redacted child-process output from a process that actually ran.
             self.fail_with(err.clone()).await;
             return Err(err);
         }
@@ -527,18 +545,14 @@ impl LocalRuntimeManager {
                 self.broadcast(&snap).await;
                 Ok(snap)
             }
-            ReadyOutcome::ExitedEarly => {
+            ReadyOutcome::ExitedEarly { exit_code } => {
                 self.teardown_managed().await;
-                let err = LocalRuntimeError::ProcessExitedEarly { exit_code: None };
-                self.fail_with(err.clone()).await;
-                Err(err)
-            }
-            ReadyOutcome::PortHijacked => {
-                self.teardown_managed().await;
-                let err = LocalRuntimeError::PortConflict {
-                    port: settings.port,
-                };
-                self.fail_with(err.clone()).await;
+                let err = LocalRuntimeError::ProcessExitedEarly { exit_code };
+                // Attach the most recent (already-redacted) child output so the
+                // user can see why Pi Hub refused to stay up (design-v2 §15.3 —
+                // lines are redacted before entering the buffer).
+                let recent = self.recent_output_for_error().await;
+                self.fail_with_rich(err.clone(), recent).await;
                 Err(err)
             }
             ReadyOutcome::Timeout => {
@@ -585,20 +599,24 @@ impl LocalRuntimeManager {
         match outcome {
             Ok(_) => {
                 let settings = svc.settings.get().await;
-                // Confirm the port released (design-v2 §13.3).
-                let probe = svc
-                    .probe
-                    .probe(settings.port, Duration::from_secs(2))
-                    .await?;
-                let snap = if matches!(probe, ProbeResult::NotListening) {
+                // The launcher process can exit slightly before Next.js closes
+                // its socket. Do not sample only once: actively wait until the
+                // service is genuinely unreachable (design-v2 §13.3).
+                let released = self
+                    .wait_for_port_release(settings.port, STOP_RELEASE_TIMEOUT)
+                    .await;
+                let snap = if released {
                     self.patch_snapshot(|s| {
                         s.runtime_state = LocalRuntimeState::Stopped;
                         s.managed_process = None;
                         s.effective_url = None;
+                        s.last_error = None;
                     })
                     .await
                 } else {
-                    // Port still busy — surface but we already killed our group.
+                    // The owned process group was signalled but the endpoint is
+                    // still reachable. This is a stop failure, never a start
+                    // failure; keep the typed error so the UI labels it clearly.
                     self.patch_snapshot(|s| {
                         s.runtime_state = LocalRuntimeState::Failed;
                         s.managed_process = None;
@@ -621,6 +639,28 @@ impl LocalRuntimeManager {
         }
     }
 
+    /// Poll the identity endpoint until nothing is listening. Transient probe
+    /// errors do not count as stopped: only an explicit connection refusal does.
+    async fn wait_for_port_release(&self, port: u16, timeout: Duration) -> bool {
+        let Some(svc) = &self.services else {
+            return false;
+        };
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            match svc.probe.probe(port, Duration::from_millis(500)).await {
+                Ok(ProbeResult::NotListening) => return true,
+                Ok(
+                    ProbeResult::PiHub { .. } | ProbeResult::OtherService | ProbeResult::TimedOut,
+                )
+                | Err(_) => {}
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(STOP_RELEASE_POLL_INTERVAL).await;
+        }
+    }
+
     /// Restart = stop (if managed) then start (design-v2 §13.3).
     pub async fn restart(&self) -> Result<LocalRuntimeSnapshot, LocalRuntimeError> {
         let snap = self.snapshot().await;
@@ -633,6 +673,12 @@ impl LocalRuntimeManager {
     /// App-launch initialization: load settings, refresh, and auto-start if
     /// enabled and not suppressed (design-v2 §14.1, §14.2). Never blocks the
     /// main window; failures only update the card.
+    ///
+    /// NOTE: As of the manual-detection model, this is no longer invoked at
+    /// app launch. Detection and start/stop are fully user-driven from the
+    /// "This Mac" card (`scan_local_installations`). The method is retained
+    /// because it is covered by unit tests and is the natural hook should
+    /// auto-start be reintroduced under a future requirements change.
     pub async fn initialize(&self) {
         let Some(svc) = &self.services else {
             return;
@@ -762,7 +808,12 @@ impl LocalRuntimeManager {
                 pi_hub_package_root: triple.2,
                 settings: settings.clone(),
             };
-            svc.doctor.diagnose(&ctx).await?
+            let r = svc.doctor.diagnose(&ctx).await?;
+            // Persist the fresh report so the card's environment row and the
+            // environment page reflect why start was blocked (otherwise the UI
+            // keeps showing "未检查" with no clue about the failure).
+            self.patch_snapshot(|s| s.environment = r.clone()).await;
+            r
         };
         if report.overall == EnvironmentStatus::Blocked {
             Ok(Some(report))
@@ -781,12 +832,14 @@ impl LocalRuntimeManager {
             if tokio::time::Instant::now() >= deadline {
                 return ReadyOutcome::Timeout;
             }
-            // If our child died, fail fast.
+            // If our child died, fail fast — and capture why.
             {
                 let mut guard = self.process.lock().await;
                 if let Some(m) = guard.as_mut() {
-                    if m.is_finished() {
-                        return ReadyOutcome::ExitedEarly;
+                    if let Some(status) = m.exit_status_if_finished() {
+                        return ReadyOutcome::ExitedEarly {
+                            exit_code: status.code(),
+                        };
                     }
                 }
             }
@@ -804,8 +857,11 @@ impl LocalRuntimeManager {
                     };
                 }
                 Ok(ProbeResult::OtherService) => {
-                    // Port became a non-Pi-Hub service while starting.
-                    return ReadyOutcome::PortHijacked;
+                    // The owned child may bind the socket before its identity
+                    // route is ready (or temporarily return a 5xx). Do not call
+                    // that an external port conflict while our child is still
+                    // alive. A real bind collision makes the child exit and is
+                    // reported by the next `exit_status_if_finished` check.
                 }
                 _ => {}
             }
@@ -824,14 +880,53 @@ impl LocalRuntimeManager {
     }
 
     async fn fail_with(&self, err: LocalRuntimeError) {
+        self.fail_with_rich(err, None).await;
+    }
+
+    /// Like `fail_with`, but optionally attaches already-redacted recent child
+    /// output to the error DTO's `details["recentOutput"]` so the UI can show
+    /// *why* Pi Hub failed (e.g. exited early). The output comes from
+    /// `RuntimeLogBuffer`, which redacts secrets on ingest (design-v2 §15.3).
+    async fn fail_with_rich(&self, err: LocalRuntimeError, recent_output: Option<String>) {
         let snap = self
             .patch_snapshot(|s| {
                 s.runtime_state = LocalRuntimeState::Failed;
-                s.last_error = Some(err.to_dto_with_details());
+                let mut dto = err.to_dto_with_details();
+                if let Some(out) = &recent_output {
+                    if !out.is_empty() {
+                        dto.details.insert("recentOutput".into(), out.clone());
+                    }
+                }
+                s.last_error = Some(dto);
                 s.managed_process = None;
             })
             .await;
         self.broadcast(&snap).await;
+    }
+
+    /// Collect the most recent child output lines (stdout + stderr, newest
+    /// last) as a single string for attachment to a start-failure error.
+    async fn recent_output_for_error(&self) -> Option<String> {
+        let Some(svc) = &self.services else {
+            return None;
+        };
+        let lines = svc.logs.recent(Some(20));
+        if lines.is_empty() {
+            return None;
+        }
+        Some(
+            lines
+                .iter()
+                .map(|l| {
+                    let stream = match l.stream {
+                        LogStream::Stdout => "stdout",
+                        LogStream::Stderr => "stderr",
+                    };
+                    format!("[{stream}] {}", l.text)
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
     }
 }
 
@@ -840,8 +935,9 @@ enum ReadyOutcome {
         version: String,
         protocol_version: u32,
     },
-    ExitedEarly,
-    PortHijacked,
+    ExitedEarly {
+        exit_code: Option<i32>,
+    },
     Timeout,
     Superseded,
 }
@@ -1044,6 +1140,9 @@ pub mod test_support {
         /// When true, the spawned child exits immediately (exercises the
         /// early-exit path in `wait_for_ready`).
         pub exit_fast: bool,
+        /// Optional stderr lines pushed to the log buffer on start (simulates a
+        /// real child that prints an error before exiting).
+        pub stderr_lines: Vec<String>,
     }
     impl Default for FakeSupervisor {
         fn default() -> Self {
@@ -1056,6 +1155,7 @@ pub mod test_support {
                 starts: Arc::new(std::sync::atomic::AtomicU32::new(0)),
                 stops: Arc::new(std::sync::atomic::AtomicU32::new(0)),
                 exit_fast: false,
+                stderr_lines: Vec::new(),
             }
         }
         pub fn new_exiting() -> Self {
@@ -1070,10 +1170,14 @@ pub mod test_support {
         async fn start(
             &self,
             _spec: StartSpec,
-            _logs: Arc<RuntimeLogBuffer>,
+            logs: Arc<RuntimeLogBuffer>,
         ) -> Result<ManagedProcess, LocalRuntimeError> {
             self.starts
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // Simulate a child that emits stderr before the manager polls it.
+            for line in &self.stderr_lines {
+                logs.push_raw(LogStream::Stderr, line);
+            }
             #[cfg(unix)]
             {
                 let mut cmd = tokio::process::Command::new("sleep");
@@ -1152,8 +1256,57 @@ pub mod test_support {
 mod tests {
     use super::*;
     use crate::credential::in_memory::InMemoryCredentialStore;
+    use crate::error::ErrorCode;
     use crate::local_runtime::settings::LocalRuntimeSettingsStore;
     use test_support::*;
+
+    struct TransientIdentityProbe {
+        calls: std::sync::atomic::AtomicU32,
+    }
+
+    #[async_trait::async_trait]
+    impl LocalServiceProbe for TransientIdentityProbe {
+        async fn probe(
+            &self,
+            _port: u16,
+            _timeout: Duration,
+        ) -> Result<ProbeResult, LocalRuntimeError> {
+            let call = self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(match call {
+                0 => ProbeResult::NotListening,
+                1 => ProbeResult::OtherService,
+                _ => ProbeResult::PiHub {
+                    version: "0.0.42".into(),
+                    protocol_version: 1,
+                },
+            })
+        }
+    }
+
+    /// Start identifies immediately, while stop observes the Pi Hub listener
+    /// for two more polls before it is finally released.
+    struct DelayedStopReleaseProbe {
+        calls: std::sync::atomic::AtomicU32,
+    }
+
+    #[async_trait::async_trait]
+    impl LocalServiceProbe for DelayedStopReleaseProbe {
+        async fn probe(
+            &self,
+            _port: u16,
+            _timeout: Duration,
+        ) -> Result<ProbeResult, LocalRuntimeError> {
+            let call = self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(match call {
+                0 => ProbeResult::NotListening,
+                1..=3 => ProbeResult::PiHub {
+                    version: "0.0.42".into(),
+                    protocol_version: 1,
+                },
+                _ => ProbeResult::NotListening,
+            })
+        }
+    }
 
     fn blocked_report() -> EnvironmentReport {
         EnvironmentReport {
@@ -1453,6 +1606,37 @@ mod tests {
         assert!(matches!(res, Err(LocalRuntimeError::DoctorBlocked(_))));
         let snap = mgr.snapshot().await;
         assert_eq!(snap.runtime_state, LocalRuntimeState::Failed);
+        assert_eq!(snap.environment.overall, EnvironmentStatus::Blocked);
+        assert_eq!(snap.environment.checks.len(), 1);
+        assert_eq!(snap.environment.checks[0].id, "DEP-NODE-001");
+        let last = snap
+            .last_error
+            .expect("last_error set when start is blocked");
+        assert_eq!(last.code, ErrorCode::PiHubDoctorBlocked);
+        assert!(!last.details.contains_key("recentOutput"));
+    }
+
+    #[tokio::test]
+    async fn successful_doctor_recheck_clears_stale_blocking_error() {
+        let mgr = manager_with(
+            Arc::new(probe(ProbeResult::NotListening)),
+            Arc::new(FakeDoctor {
+                report: ready_report(),
+            }),
+        );
+        persist_fake_installation(&mgr).await;
+        mgr.patch_snapshot(|s| {
+            s.environment = blocked_report();
+            s.last_error =
+                Some(LocalRuntimeError::DoctorBlocked("blocked".into()).to_dto_with_details());
+        })
+        .await;
+
+        let report = mgr.run_doctor(true).await.expect("recheck succeeds");
+        assert_eq!(report.overall, EnvironmentStatus::Ready);
+        let snap = mgr.snapshot().await;
+        assert_eq!(snap.environment.overall, EnvironmentStatus::Ready);
+        assert!(snap.last_error.is_none());
     }
 
     #[tokio::test]
@@ -1523,11 +1707,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stop_polls_until_listener_is_really_released() {
+        let supervisor = Arc::new(FakeSupervisor::new());
+        let probe = Arc::new(DelayedStopReleaseProbe {
+            calls: std::sync::atomic::AtomicU32::new(0),
+        });
+        let mgr = manager_with_supervisor(
+            probe.clone(),
+            Arc::new(FakeDoctor {
+                report: ready_report(),
+            }),
+            supervisor,
+        );
+        persist_fake_installation(&mgr).await;
+        mgr.start().await.expect("start succeeds");
+
+        let snap = mgr
+            .stop()
+            .await
+            .expect("stop succeeds after delayed release");
+        assert_eq!(snap.runtime_state, LocalRuntimeState::Stopped);
+        assert!(snap.effective_url.is_none());
+        assert!(snap.last_error.is_none());
+        // preflight + ready + at least three stop checks
+        assert!(probe.calls.load(Ordering::Relaxed) >= 5);
+    }
+
+    #[tokio::test]
     async fn start_reports_exited_early_when_child_dies() {
         // The child (`sleep 0`) exits immediately; the probe never reports
         // ready, so wait_for_ready must detect the dead handle and report
-        // ProcessExitedEarly, then tear it down.
+        // ProcessExitedEarly with the real exit code, then tear it down.
         let supervisor = Arc::new(FakeSupervisor::new_exiting());
+        let mgr = manager_with_supervisor(
+            Arc::new(probe(ProbeResult::NotListening)),
+            Arc::new(FakeDoctor {
+                report: ready_report(),
+            }),
+            supervisor.clone(),
+        );
+        persist_fake_installation(&mgr).await;
+
+        let res = mgr.start().await;
+        // `sleep 0` exits with code 0 — we must capture it (not None).
+        assert!(matches!(
+            res,
+            Err(LocalRuntimeError::ProcessExitedEarly { exit_code: Some(0) })
+        ));
+        let snap = mgr.snapshot().await;
+        assert_eq!(snap.runtime_state, LocalRuntimeState::Failed);
+        assert!(snap.managed_process.is_none());
+        // The persisted error must carry the exit code + a recentOutput hint.
+        let last = snap.last_error.expect("last_error set on failure");
+        assert_eq!(last.details.get("exitCode").map(String::as_str), Some("0"));
+    }
+
+    #[tokio::test]
+    async fn start_failure_attaches_recent_output() {
+        // When Pi Hub exits early, the persisted error should carry the most
+        // recent (redacted) child output so the user can see *why* it died.
+        let supervisor = Arc::new(FakeSupervisor {
+            stderr_lines: vec![
+                "Error: Cannot find module '@jarome/pi-hub'".into(),
+                "    at Function.run (node:internal/modules/cjs/loader:nnn)".into(),
+            ],
+            ..FakeSupervisor::new_exiting()
+        });
         let mgr = manager_with_supervisor(
             Arc::new(probe(ProbeResult::NotListening)),
             Arc::new(FakeDoctor {
@@ -1540,25 +1785,28 @@ mod tests {
         let res = mgr.start().await;
         assert!(matches!(
             res,
-            Err(LocalRuntimeError::ProcessExitedEarly { .. })
+            Err(LocalRuntimeError::ProcessExitedEarly { exit_code: Some(0) })
         ));
         let snap = mgr.snapshot().await;
-        assert_eq!(snap.runtime_state, LocalRuntimeState::Failed);
-        assert!(snap.managed_process.is_none());
+        let last = snap.last_error.expect("last_error set");
+        let recent = last
+            .details
+            .get("recentOutput")
+            .expect("recentOutput attached");
+        assert!(recent.contains("Cannot find module"));
+        assert!(recent.contains("[stderr]"));
     }
 
     #[tokio::test]
-    async fn start_reports_port_hijacked_during_poll() {
-        // Port is free at the initial check but reads as a non-Pi-Hub service
-        // while polling for ready → PortConflict + teardown.
+    async fn start_retries_transient_unidentified_response() {
+        // A managed Next.js child can bind before /api/client-info is ready.
+        // One unidentified/5xx response must not be called an external port
+        // conflict; keep polling until the owned service identifies itself.
         let supervisor = Arc::new(FakeSupervisor::new());
-        let p = paired_probe(
-            &supervisor,
-            ProbeResult::NotListening,
-            ProbeResult::OtherService,
-        );
         let mgr = manager_with_supervisor(
-            Arc::new(p),
+            Arc::new(TransientIdentityProbe {
+                calls: std::sync::atomic::AtomicU32::new(0),
+            }),
             Arc::new(FakeDoctor {
                 report: ready_report(),
             }),
@@ -1566,13 +1814,12 @@ mod tests {
         );
         persist_fake_installation(&mgr).await;
 
-        let res = mgr.start().await;
-        assert!(matches!(res, Err(LocalRuntimeError::PortConflict { .. })));
-        // The hijacked managed process was torn down.
-        assert_eq!(
-            supervisor.stops.load(std::sync::atomic::Ordering::Relaxed),
-            1
-        );
+        let snap = mgr
+            .start()
+            .await
+            .expect("transient identity failure recovers");
+        assert_eq!(snap.runtime_state, LocalRuntimeState::RunningManaged);
+        assert_eq!(supervisor.stops.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]

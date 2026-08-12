@@ -30,7 +30,9 @@ function AppShell() {
   const navigate = useNavigate();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const closeSettings = useCallback(() => setSettingsOpen(false), []);
-  const isViewer = location.pathname.startsWith("/viewer/");
+  const isViewer =
+    location.pathname.startsWith("/viewer/") ||
+    location.pathname === "/local-runtime/viewer";
 
   useEffect(() => {
     let unlistenHome: (() => void) | undefined;

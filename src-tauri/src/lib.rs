@@ -158,6 +158,19 @@ pub fn run() {
         .manage(state.credentials)
         .manage(state.manager)
         .setup(move |app| {
+            // Inject the Tauri-backed connection broadcaster now that the
+            // AppHandle exists (plan §5.5). The manager was constructed with a
+            // NoopBroadcaster in build_state; this swaps it in so reconnect
+            // state changes reach the Viewer.
+            {
+                if let Some(conn_mgr) = app.try_state::<std::sync::Arc<ConnectionManager>>() {
+                    let conn_mgr = conn_mgr.inner().clone();
+                    conn_mgr.set_broadcaster(std::sync::Arc::new(
+                        crate::connection::broadcaster::TauriBroadcaster::new(app.handle().clone()),
+                    ));
+                }
+            }
+
             #[cfg(desktop)]
             {
                 // The macOS menu bar remains available while the Pi Hub viewer
@@ -249,27 +262,52 @@ pub fn run() {
             );
             app.manage(pkg_manager);
 
-            // Async app-launch init: scan + optional auto-start (design-v2 §14.1).
-            let init_manager = manager.clone();
-            tauri::async_runtime::spawn(async move {
-                init_manager.initialize().await;
-            });
+            // Local-runtime detection & start/stop are fully user-driven from
+            // the "This Mac" card (scan_local_installations). App launch no
+            // longer auto-refreshes or auto-starts; auto_start_on_app_launch is
+            // retained in settings for forward compatibility but has no launch
+            // call site in this version.
             Ok(())
         })
-        .on_window_event(|window, event| {
-            // V2-FR-016: refresh observable local-runtime state when the app
-            // regains focus (cheap, server-driven; never optimistic local
-            // state). Window-close is intentionally NOT handled here — true
-            // app exit stops the managed process via `ExitRequested` below.
-            if let tauri::WindowEvent::Focused(true) = event {
-                if let Some(manager) = window.app_handle().try_state::<Arc<LocalRuntimeManager>>() {
-                    let manager = manager.inner().clone();
-                    tauri::async_runtime::spawn(async move {
-                        let _ = manager.refresh().await;
-                    });
+        .on_window_event(
+            #[cfg_attr(not(mobile), allow(unused_variables))]
+            |window, event| {
+                // Local-runtime detection is user-driven from the "This Mac" card;
+                // window focus no longer triggers an automatic refresh.
+                //
+                // iOS lifecycle (plan §5.5): Suspended/Resumed are mobile-only
+                // window events (applicationWillResignActive / foreground). Drive
+                // the connection reconnect gate so SSH backoff pauses in the
+                // background and resumes immediately on foreground. Desktop does
+                // not emit these.
+                #[cfg(mobile)]
+                match event {
+                    tauri::WindowEvent::Resumed => {
+                        if let Some(conn) =
+                            window.app_handle().try_state::<Arc<ConnectionManager>>()
+                        {
+                            let conn = conn.inner().clone();
+                            tauri::async_runtime::spawn(async move {
+                                conn.set_lifecycle(crate::platform::AppLifecycle::Foreground)
+                                    .await;
+                            });
+                        }
+                    }
+                    tauri::WindowEvent::Suspended => {
+                        if let Some(conn) =
+                            window.app_handle().try_state::<Arc<ConnectionManager>>()
+                        {
+                            let conn = conn.inner().clone();
+                            tauri::async_runtime::spawn(async move {
+                                conn.set_lifecycle(crate::platform::AppLifecycle::Background)
+                                    .await;
+                            });
+                        }
+                    }
+                    _ => {}
                 }
-            }
-        })
+            },
+        )
         .invoke_handler(tauri::generate_handler![
             commands::profiles::list_services,
             commands::profiles::get_service,
@@ -344,6 +382,19 @@ pub fn run() {
                         let _ = tokio::time::timeout(
                             std::time::Duration::from_secs(4),
                             pkg.on_app_exit(),
+                        )
+                        .await;
+                    }
+                    // V1 reliability: tear down every connection (cancel
+                    // reconnect supervisors + release SSH/listeners) so nothing
+                    // outlives the app (plan §5.5).
+                    if let Some(conn) =
+                        app_handle.try_state::<Arc<ConnectionManager>>()
+                    {
+                        let conn = conn.inner().clone();
+                        let _ = tokio::time::timeout(
+                            std::time::Duration::from_secs(4),
+                            conn.on_app_exit(),
                         )
                         .await;
                     }

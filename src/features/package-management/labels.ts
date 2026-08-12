@@ -34,7 +34,7 @@ export function productDescription(product: ProductId): string {
 export function installStateLabel(state: ProductInstallState): string {
   switch (state) {
     case "unknown":
-      return "未检测";
+      return "无法验证";
     case "not_installed":
       return "未安装";
     case "installed":
@@ -74,6 +74,7 @@ export function sourceLabel(source: InstallationSource): string {
     asdf: "ASDF",
     mise: "Mise",
     manual: "手动路径",
+    npm_global: "npm 全局安装",
     desktop_managed: "Desktop 受管",
   };
   return map[source];
@@ -131,11 +132,11 @@ export function actionLabel(action: ProductAction): string {
     case "install":
       return "安装";
     case "update":
-      return "更新";
+      return "升级";
     case "repair":
       return "修复安装";
     case "activate":
-      return "使用受管版本";
+      return "使用此版本";
     case "cancel":
       return "取消";
     case "confirm_restart":

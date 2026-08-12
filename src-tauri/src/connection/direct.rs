@@ -60,6 +60,7 @@ impl ConnectionProvider for DirectUrlProvider {
             effective_url: base.clone(),
             resources: ConnectionResources {
                 forward: None,
+                health: None,
                 cancellation: CancellationToken::new(),
             },
         }))

@@ -82,7 +82,12 @@ impl DefaultPiEnvironmentDoctor {
     async fn run_pi_hub_doctor(&self, ctx: &DoctorContext) -> Vec<CheckResult> {
         let mut env: Vec<(&str, &str)> = Vec::new();
         let agent_dir_str;
-        if let Some(dir) = &ctx.settings.pi_agent_dir {
+        if let Some(dir) = ctx
+            .settings
+            .pi_agent_dir
+            .as_ref()
+            .filter(|dir| !dir.as_os_str().is_empty())
+        {
             agent_dir_str = dir.to_string_lossy().into_owned();
             env.push(("PI_CODING_AGENT_DIR", agent_dir_str.as_str()));
         }
@@ -331,7 +336,11 @@ fn check_agent_dir(ctx: &DoctorContext) -> CheckResult {
 /// Resolve the effective Pi Agent dir (design-v2 §8.4): `PI_CODING_AGENT_DIR`
 /// override from settings, otherwise `~/.pi/agent`.
 fn effective_agent_dir(settings: &LocalRuntimeSettings) -> Option<PathBuf> {
-    if let Some(dir) = &settings.pi_agent_dir {
+    if let Some(dir) = settings
+        .pi_agent_dir
+        .as_ref()
+        .filter(|dir| !dir.as_os_str().is_empty())
+    {
         return Some(dir.clone());
     }
     let home = std::env::var_os("HOME").map(PathBuf::from)?;
@@ -367,7 +376,9 @@ struct DoctorDocument {
 
 #[derive(Debug, Deserialize)]
 struct RawCheck {
-    id: String,
+    /// Pi Hub uses `name`; older contracts used `id`. Accept either.
+    #[serde(default, alias = "name")]
+    id: Option<String>,
     #[serde(default)]
     category: Option<String>,
     #[serde(default)]
@@ -382,6 +393,10 @@ struct RawCheck {
     remediation: Option<String>,
     #[serde(default)]
     details: BTreeMap<String, serde_json::Value>,
+    /// Pi Hub emits `detail` (singular) as a string or object. Normalize to
+    /// `details` so the UI can show it.
+    #[serde(default)]
+    detail: Option<serde_json::Value>,
 }
 
 /// Parse Pi Hub's doctor JSON into validated check results. On schema/version
@@ -419,15 +434,34 @@ fn parse_doctor_output(stdout: &str, exit_code: Option<i32>) -> Vec<CheckResult>
     }
     doc.checks
         .into_iter()
-        .map(|c| CheckResult {
-            id: c.id,
-            category: parse_category(c.category.as_deref()),
-            severity: parse_severity(c.severity.as_deref()),
-            status: parse_status(c.status.as_deref()),
-            code: c.code,
-            message: c.message,
-            remediation: c.remediation,
-            details: c.details,
+        .enumerate()
+        .map(|(i, c)| {
+            // Merge singular `detail` (string or object) into the `details`
+            // map so the UI can display it regardless of which shape Pi Hub
+            // emitted.
+            let mut details = c.details;
+            if let Some(d) = c.detail {
+                let key = "detail";
+                match d {
+                    serde_json::Value::String(s) => {
+                        details.insert(key.into(), serde_json::Value::String(s));
+                    }
+                    other if !other.is_null() => {
+                        details.insert(key.into(), other);
+                    }
+                    _ => {}
+                }
+            }
+            CheckResult {
+                id: c.id.unwrap_or_else(|| format!("doctor-check-{i}")),
+                category: parse_category(c.category.as_deref()),
+                severity: parse_severity(c.severity.as_deref()),
+                status: parse_status(c.status.as_deref()),
+                code: c.code,
+                message: c.message,
+                remediation: c.remediation,
+                details,
+            }
         })
         .collect::<Vec<_>>()
         .into_iter()
@@ -658,6 +692,18 @@ mod tests {
     }
 
     #[test]
+    fn empty_agent_dir_override_uses_default_directory() {
+        let settings = LocalRuntimeSettings {
+            pi_agent_dir: Some(PathBuf::new()),
+            ..Default::default()
+        };
+
+        let resolved = effective_agent_dir(&settings).expect("HOME resolves default agent dir");
+        assert!(!resolved.as_os_str().is_empty());
+        assert!(resolved.ends_with(".pi/agent"));
+    }
+
+    #[test]
     fn aggregate_blocked_on_required_fail() {
         let checks = vec![
             CheckResult {
@@ -757,6 +803,43 @@ mod tests {
         assert!(checks
             .iter()
             .any(|c| c.id == "DEP-PIHUB-DOCTOR-EXIT" && c.status == CheckStatus::Pass));
+    }
+
+    #[test]
+    fn parse_doctor_output_real_pi_hub_schema() {
+        // Pi Hub's actual `doctor --json --offline` output uses `name` (not
+        // `id`), `detail` (not `details`), and emits no category/severity. This
+        // must parse without falling back to the invalid-output failure, and
+        // all-pass checks must aggregate to Ready.
+        let json = serde_json::json!({
+            "schemaVersion": 1,
+            "status": "healthy",
+            "checks": [
+                {"name": "nodeVersion", "status": "pass", "detail": "24.10.0"},
+                {"name": "piHubHome", "status": "pass", "detail": "/Users/x/.pi/hub (writable: true)"},
+                {"name": "buildArtifacts", "status": "pass", "detail": "/opt/.../.next (exists: true)"},
+                {"name": "envReport", "status": "pass", "detail": {"PI_HUB_HOME": false, "PI_HUB_PASSWORD": false}}
+            ]
+        })
+        .to_string();
+        let checks = parse_doctor_output(&json, Some(0));
+        // No invalid-output fallback.
+        assert!(checks
+            .iter()
+            .all(|c| c.code.as_deref() != Some("pi_hub_doctor_invalid_output")));
+        // `name` was accepted as the check id.
+        assert!(checks.iter().any(|c| c.id == "nodeVersion"));
+        // `detail` (string) merged into details.
+        let node_check = checks
+            .iter()
+            .find(|c| c.id == "nodeVersion")
+            .expect("nodeVersion check exists");
+        assert_eq!(
+            node_check.details.get("detail").and_then(|v| v.as_str()),
+            Some("24.10.0")
+        );
+        // All pass → Ready (not Blocked).
+        assert_eq!(aggregate(&checks), EnvironmentStatus::Ready);
     }
 
     #[test]

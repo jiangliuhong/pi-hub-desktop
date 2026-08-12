@@ -236,7 +236,11 @@ fn validate(s: &LocalRuntimeSettings) -> Result<(), LocalRuntimeError> {
 /// user can save a not-yet-present target and have it re-validated later
 /// (design-v2 §6.4: paths are re-validated before use, not blindly trusted).
 fn canonicalize_optional(p: PathBuf) -> Option<PathBuf> {
-    Some(canonicalize_or_keep(&p))
+    if p.as_os_str().is_empty() {
+        None
+    } else {
+        Some(canonicalize_or_keep(&p))
+    }
 }
 
 fn canonicalize_or_keep(p: &Path) -> PathBuf {
@@ -261,6 +265,13 @@ fn parse_and_migrate(json: &str) -> Result<LocalRuntimeSettings, LocalRuntimeErr
     let mut settings: LocalRuntimeSettings = serde_json::from_value(value)
         .map_err(|e| LocalRuntimeError::Internal(format!("settings schema mismatch: {e}")))?;
     settings.schema_version = CURRENT_SCHEMA_VERSION;
+    // Older UI versions serialized cleared optional path inputs as "". Treat
+    // those as absent so Doctor and the detector use their documented default
+    // paths instead of interpreting an empty PathBuf as an explicit override.
+    settings.node_executable = settings.node_executable.and_then(canonicalize_optional);
+    settings.pi_hub_entrypoint = settings.pi_hub_entrypoint.and_then(canonicalize_optional);
+    settings.pi_hub_package_root = settings.pi_hub_package_root.and_then(canonicalize_optional);
+    settings.pi_agent_dir = settings.pi_agent_dir.and_then(canonicalize_optional);
     validate(&settings)?;
     Ok(settings)
 }
@@ -386,6 +397,57 @@ mod tests {
             .await
             .unwrap();
         assert!(store.get().await.pi_hub_credential_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn empty_optional_path_update_clears_override() {
+        let store = LocalRuntimeSettingsStore::in_memory();
+        store
+            .update(LocalRuntimeSettingsUpdate {
+                pi_agent_dir: Some(PathBuf::from("/tmp/pi-agent")),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(store.get().await.pi_agent_dir.is_some());
+
+        store
+            .update(LocalRuntimeSettingsUpdate {
+                pi_agent_dir: Some(PathBuf::new()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(store.get().await.pi_agent_dir.is_none());
+    }
+
+    #[tokio::test]
+    async fn load_normalizes_legacy_empty_optional_paths() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("local-runtime.json");
+        fs::write(
+            &path,
+            r#"{
+              "schema_version": 1,
+              "port": 30142,
+              "auto_start_on_app_launch": false,
+              "stop_managed_on_app_exit": true,
+              "node_executable": "",
+              "pi_hub_entrypoint": "",
+              "pi_hub_package_root": "",
+              "pi_agent_dir": ""
+            }"#,
+        )
+        .await
+        .unwrap();
+
+        let store = LocalRuntimeSettingsStore::new(&path);
+        store.load().await.unwrap();
+        let loaded = store.get().await;
+        assert!(loaded.node_executable.is_none());
+        assert!(loaded.pi_hub_entrypoint.is_none());
+        assert!(loaded.pi_hub_package_root.is_none());
+        assert!(loaded.pi_agent_dir.is_none());
     }
 
     #[tokio::test]

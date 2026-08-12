@@ -22,4 +22,10 @@ export interface ConnectionDiagnostics {
   target_port: number | null;
   listener_started: boolean;
   retry_count: number;
+  /** Monotonic operation generation (plan-remote-pi-hub-performance §4.1). */
+  generation: number;
+  /** Reconnect attempts since the last successful connect. */
+  reconnect_count: number;
+  /** Non-sensitive classification of why the last session ended. */
+  last_close_reason: string | null;
 }

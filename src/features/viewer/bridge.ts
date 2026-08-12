@@ -80,8 +80,10 @@ export function parsePiHubHostExtensionEvent(
   }
   if (
     value.extensionId !== CLIENT_MENU_EXTENSION_ID ||
-    (value.itemId !== RETURN_TO_SERVICES_ITEM_ID && value.itemId !== OPEN_SETTINGS_ITEM_ID)
-  ) return null;
+    (value.itemId !== RETURN_TO_SERVICES_ITEM_ID &&
+      value.itemId !== OPEN_SETTINGS_ITEM_ID)
+  )
+    return null;
   return value as unknown as PiHubHostExtensionEvent;
 }
 

@@ -172,6 +172,8 @@ pub enum InstallationSource {
     Asdf,
     Mise,
     Manual,
+    /// Installed in the global prefix of the selected npm toolchain.
+    NpmGlobal,
     /// V3: a Desktop-managed copy under the app's Application Support dir
     /// (docs/requirements-v3.md §3.2). Reused by the package-management
     /// detector to mark owned installations.
@@ -190,6 +192,7 @@ impl InstallationSource {
             InstallationSource::Asdf => "asdf",
             InstallationSource::Mise => "mise",
             InstallationSource::Manual => "manual",
+            InstallationSource::NpmGlobal => "npm_global",
             InstallationSource::DesktopManaged => "desktop_managed",
         }
     }

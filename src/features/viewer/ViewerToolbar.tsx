@@ -1,14 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
+import { listen } from "@tauri-apps/api/event";
 import { closeServiceView, openServiceView } from "./api";
 import {
-  createHostExtensionRegistration,
-  OPEN_SETTINGS_ITEM_ID,
-  parsePiHubHostExtensionEvent,
-} from "./bridge";
-import { getConnectionStatus } from "../connection/api";
+  getConnectionStatus,
+  STATE_CHANGED_EVENT,
+  type StateChangedPayload,
+} from "../connection/api";
 import { PagePlaceholder } from "../../components/PagePlaceholder";
 import type { AppErrorDto } from "../../lib/tauri";
+import { PiHubFrame } from "./PiHubFrame";
 
 /**
  * Full-window Service View for the existing Pi Hub WebUI
@@ -22,8 +23,6 @@ import type { AppErrorDto } from "../../lib/tauri";
 export function ViewerToolbar() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const frameRef = useRef<HTMLIFrameElement>(null);
-  const registrationTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
   const [effectiveUrl, setEffectiveUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -52,6 +51,34 @@ export function ViewerToolbar() {
     };
   }, [id]);
 
+  // Reliability (plan §5.5.4): after an SSH reconnect the Rust side publishes
+  // a new effective_url (the loopback port changes). Subscribe to state-changed
+  // and reload the iframe onto the new URL so the Viewer doesn't keep hitting
+  // a dead, released listener. `src={effectiveUrl}` is declarative, so
+  // updating the state is enough for React to reload the frame; the host
+  // extension registration effect (below) re-keys on `effectiveUrl` too.
+  useEffect(() => {
+    if (!id) return;
+    const unlisten = listen<StateChangedPayload>(
+      STATE_CHANGED_EVENT,
+      (event) => {
+        const payload = event.payload;
+        if (payload.service_id !== id) return;
+        if (payload.effective_url && payload.effective_url !== effectiveUrl) {
+          void openServiceView(id, payload.effective_url).catch(() => {
+            // Re-registration is best-effort; the iframe reload is the
+            // important part. A failure here surfaces as a Viewer load error
+            // on the new URL, which the user can retry.
+          });
+          setEffectiveUrl(payload.effective_url);
+        }
+      },
+    );
+    return () => {
+      void unlisten.then((fn) => fn());
+    };
+  }, [id, effectiveUrl]);
+
   const returnToList = useCallback(async () => {
     if (id) {
       try {
@@ -62,47 +89,6 @@ export function ViewerToolbar() {
     }
     void navigate("/");
   }, [id, navigate]);
-
-  useEffect(() => {
-    if (!effectiveUrl) return;
-    const allowedOrigin = new URL(effectiveUrl).origin;
-    const receiveHostAction = (event: MessageEvent<unknown>) => {
-      if (event.source !== frameRef.current?.contentWindow) return;
-      if (event.origin !== allowedOrigin) return;
-      const extensionEvent = parsePiHubHostExtensionEvent(event.data);
-      if (extensionEvent?.itemId === OPEN_SETTINGS_ITEM_ID) {
-        window.dispatchEvent(new Event("app:open-settings"));
-      } else if (extensionEvent?.itemId === "return_to_services") {
-        void returnToList();
-      }
-    };
-    window.addEventListener("message", receiveHostAction);
-    return () => {
-      window.removeEventListener("message", receiveHostAction);
-      for (const timer of registrationTimersRef.current) clearTimeout(timer);
-      registrationTimersRef.current = [];
-    };
-  }, [effectiveUrl, returnToList]);
-
-  const registerHostExtensions = () => {
-    if (!effectiveUrl) return;
-    const allowedOrigin = new URL(effectiveUrl).origin;
-    const registration = createHostExtensionRegistration();
-    const send = () => {
-      frameRef.current?.contentWindow?.postMessage(registration, allowedOrigin);
-    };
-
-    // The iframe's load event can race React hydration in the remote Hub. A
-    // single postMessage may arrive before useHostExtensions subscribes, so
-    // retry briefly after load. Registrations are idempotent by extension id
-    // and revision, and all timers are cleared when the viewer unmounts.
-    for (const timer of registrationTimersRef.current) clearTimeout(timer);
-    registrationTimersRef.current = [];
-    send();
-    for (const delay of [50, 250, 1000]) {
-      registrationTimersRef.current.push(setTimeout(send, delay));
-    }
-  };
 
   if (error) {
     return (
@@ -116,17 +102,9 @@ export function ViewerToolbar() {
   return (
     <div className="viewer-page">
       {effectiveUrl ? (
-        <iframe
-          ref={frameRef}
-          className="service-view-frame"
-          src={effectiveUrl}
-          title="Pi Hub"
-          referrerPolicy="no-referrer"
-          // Clipboard access is required for user-initiated paste in the
-          // cross-origin Service View. This does not grant the frame any
-          // Tauri capability or access to the trusted App Shell.
-          allow={`clipboard-read ${new URL(effectiveUrl).origin}; clipboard-write ${new URL(effectiveUrl).origin}`}
-          onLoad={registerHostExtensions}
+        <PiHubFrame
+          effectiveUrl={effectiveUrl}
+          onReturnToServices={returnToList}
         />
       ) : null}
     </div>

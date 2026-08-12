@@ -11,6 +11,7 @@ use crate::error::AppError;
 use crate::profile::model::ServiceProfile;
 use crate::ssh::client::PresentedHostKey;
 use crate::ssh::forward::LocalForward;
+use crate::ssh::health::HealthHandle;
 use crate::ssh::host_key::KnownHostRecord;
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -53,6 +54,9 @@ pub struct EstablishedConnection {
 pub struct ConnectionResources {
     /// SSH forward (loopback listener + channels), if any. `None` for direct.
     pub forward: Option<LocalForward>,
+    /// SSH session-health monitor, if any. `None` for direct. The supervisor
+    /// clones this and awaits session loss to trigger reconnect (plan §5.4).
+    pub health: Option<HealthHandle>,
     pub cancellation: CancellationToken,
 }
 
@@ -63,6 +67,8 @@ impl ConnectionResources {
         if let Some(fwd) = self.forward {
             fwd.shutdown().await;
         }
+        // The health handle is a read-only `watch::Receiver`; its sender is
+        // dropped when the SSH session task ends. Nothing to await here.
     }
 
     /// True when the loopback listener has been bound (used in diagnostics).

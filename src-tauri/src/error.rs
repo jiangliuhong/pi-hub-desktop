@@ -36,6 +36,13 @@ pub enum ErrorCode {
     NotFound,
     Io,
     Internal,
+    // --- V1 connection reliability codes (plan-remote-pi-hub-performance §5.6) ---
+    SshKeepaliveTimeout,
+    SshTransportClosed,
+    SshChannelOpenFailed,
+    NetworkPathChanged,
+    ForegroundSessionInvalid,
+    ViewerReloadFailed,
     // --- V2 local runtime codes (docs/design-v2.md §18) ---
     LocalRuntimeUnsupportedPlatform,
     LocalRuntimeOperationInProgress,
@@ -91,7 +98,15 @@ impl ErrorCode {
             | ErrorCode::SshConnectTimeout
             | ErrorCode::TargetUnreachable
             | ErrorCode::ServiceHttpError
-            | ErrorCode::Io => true,
+            | ErrorCode::Io
+            // Transport-side failures observed mid-session may auto-retry
+            // (plan §5.4 / §5.6). They reflect a dead/aged SSH transport or a
+            // foreground session that went stale, not a config or credential
+            // problem.
+            | ErrorCode::SshKeepaliveTimeout
+            | ErrorCode::SshTransportClosed
+            | ErrorCode::NetworkPathChanged
+            | ErrorCode::ForegroundSessionInvalid => true,
             // Profile/credential/host-key/TLS/cancel errors are never retried
             // automatically; they require explicit user action.
             ErrorCode::InvalidProfile
@@ -106,6 +121,11 @@ impl ErrorCode {
             | ErrorCode::UnsupportedPlatform
             | ErrorCode::NotFound
             | ErrorCode::Internal
+            // Channel-level failures are handled per-channel, not as a session
+            // reconnect trigger; Viewer reload failure is surfaced for the user
+            // to retry navigation, not auto-retried by the backoff path.
+            | ErrorCode::SshChannelOpenFailed
+            | ErrorCode::ViewerReloadFailed
             // V2 local runtime errors are never auto-retried by the V1
             // connection backoff path; the manager owns its own polling and
             // crash-loop protection (design-v2 §12.2, §14.2).
@@ -178,6 +198,12 @@ impl ErrorCode {
             ErrorCode::NotFound => "not_found",
             ErrorCode::Io => "io",
             ErrorCode::Internal => "internal",
+            ErrorCode::SshKeepaliveTimeout => "ssh_keepalive_timeout",
+            ErrorCode::SshTransportClosed => "ssh_transport_closed",
+            ErrorCode::SshChannelOpenFailed => "ssh_channel_open_failed",
+            ErrorCode::NetworkPathChanged => "network_path_changed",
+            ErrorCode::ForegroundSessionInvalid => "foreground_session_invalid",
+            ErrorCode::ViewerReloadFailed => "viewer_reload_failed",
             ErrorCode::LocalRuntimeUnsupportedPlatform => "local_runtime_unsupported_platform",
             ErrorCode::LocalRuntimeOperationInProgress => "local_runtime_operation_in_progress",
             ErrorCode::NodeNotFound => "node_not_found",
@@ -393,6 +419,45 @@ pub enum SshError {
     PrivateKeyPassphraseRequired,
     #[error("ssh transport error: {0}")]
     Transport(String),
+    /// The SSH transport closed mid-session (plan §5.4 / §5.6). Classified by
+    /// [`SessionCloseReason`] so the reconnect path can decide retryability
+    /// without re-inspecting raw russh errors. Produced by the session health
+    /// monitor, never by the initial connect/auth path.
+    #[error("ssh session closed: {reason}")]
+    SessionClosed { reason: SessionCloseReason },
+}
+
+/// Non-sensitive classification of why an established SSH session ended
+/// (plan §5.4 / §5.6). Carries no secrets, host/port beyond what diagnostics
+/// already record, or business data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionCloseReason {
+    /// The remote sent an explicit SSH disconnect message.
+    RemoteDisconnect,
+    /// Keepalive probes went unanswered past the configured threshold.
+    KeepaliveTimeout,
+    /// The underlying socket closed unexpectedly (TCP RST, NAT reclaim, etc.).
+    NetworkError,
+    /// Close source could not be classified (treated as retryable).
+    Unknown,
+}
+
+impl SessionCloseReason {
+    /// Stable wire name used in diagnostics (non-sensitive).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SessionCloseReason::RemoteDisconnect => "remote_disconnect",
+            SessionCloseReason::KeepaliveTimeout => "keepalive_timeout",
+            SessionCloseReason::NetworkError => "network_error",
+            SessionCloseReason::Unknown => "unknown",
+        }
+    }
+}
+
+impl fmt::Display for SessionCloseReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 impl SshError {
@@ -405,7 +470,16 @@ impl SshError {
             SshError::AuthenticationFailed { .. } => ErrorCode::AuthenticationFailed,
             SshError::PrivateKeyInvalid => ErrorCode::PrivateKeyInvalid,
             SshError::PrivateKeyPassphraseRequired => ErrorCode::PrivateKeyPassphraseRequired,
+            // Initial-handshake transport errors are unexpected and not
+            // auto-retried as a session drop (plan §5.6).
             SshError::Transport(_) => ErrorCode::Internal,
+            // Mid-session closes map to the new retryable codes. Keepalive
+            // timeout gets its own code so diagnostics can distinguish it;
+            // every other classified close surfaces as a transport close.
+            SshError::SessionClosed {
+                reason: SessionCloseReason::KeepaliveTimeout,
+            } => ErrorCode::SshKeepaliveTimeout,
+            SshError::SessionClosed { .. } => ErrorCode::SshTransportClosed,
         }
     }
 
@@ -427,6 +501,12 @@ impl SshError {
             SshError::PrivateKeyInvalid => "私钥无效或格式不受支持。".to_string(),
             SshError::PrivateKeyPassphraseRequired => "私钥需要 Passphrase 才能解密。".to_string(),
             SshError::Transport(_) => "SSH 通信异常。".to_string(),
+            SshError::SessionClosed { reason } => match reason {
+                SessionCloseReason::KeepaliveTimeout => {
+                    "SSH 连接因长时间无响应被关闭，正在尝试重新连接。".to_string()
+                }
+                _ => "SSH 连接已断开，正在尝试重新连接。".to_string(),
+            },
         }
     }
 }
@@ -686,9 +766,14 @@ impl LocalRuntimeError {
             LocalRuntimeError::ServiceProtocolIncompatible { got, min, max } => {
                 format!("本机服务协议版本 {got} 与本客户端（支持 {min}-{max}）不兼容。")
             }
-            LocalRuntimeError::ProcessStartFailed(_) => "启动本机 Pi Hub 进程失败。".to_string(),
-            LocalRuntimeError::ProcessExitedEarly { exit_code } => {
-                format!("本机 Pi Hub 进程提前退出（退出码 {exit_code:?}）。",)
+            LocalRuntimeError::ProcessStartFailed(detail) => {
+                format!("启动本机 Pi Hub 进程失败：{detail}。")
+            }
+            LocalRuntimeError::ProcessExitedEarly { exit_code: Some(code) } => {
+                format!("本机 Pi Hub 启动后立即退出（退出码 {code}）。请查看「日志」了解详情。")
+            }
+            LocalRuntimeError::ProcessExitedEarly { exit_code: None } => {
+                "本机 Pi Hub 启动后立即退出（未获取到退出码，可能被信号终止）。请查看「日志」了解详情。".to_string()
             }
             LocalRuntimeError::ProcessNotOwned => {
                 "该 Pi Hub 由其他程序启动，本客户端无权停止。".to_string()
@@ -1015,9 +1100,94 @@ mod tests {
             AppError::Viewer(ViewerError::Other("x".into())),
             AppError::Platform(PlatformError::Unsupported),
             AppError::Cancelled,
+            AppError::Ssh(SshError::SessionClosed {
+                reason: SessionCloseReason::KeepaliveTimeout,
+            }),
+            AppError::Ssh(SshError::SessionClosed {
+                reason: SessionCloseReason::RemoteDisconnect,
+            }),
         ];
         for err in cases {
             assert!(!err.to_dto().message.is_empty(), "{err:?} empty message");
         }
+    }
+
+    /// Reliability error codes and retryability (plan §5.6). Transport-side
+    /// session drops are auto-retryable; channel/viewer failures are not.
+    #[test]
+    fn reliability_error_codes_retryability() {
+        assert!(ErrorCode::SshKeepaliveTimeout.auto_retryable());
+        assert!(ErrorCode::SshTransportClosed.auto_retryable());
+        assert!(ErrorCode::NetworkPathChanged.auto_retryable());
+        assert!(ErrorCode::ForegroundSessionInvalid.auto_retryable());
+        assert!(!ErrorCode::SshChannelOpenFailed.auto_retryable());
+        assert!(!ErrorCode::ViewerReloadFailed.auto_retryable());
+    }
+
+    /// Every reliability code has a stable snake_case wire name (plan §5.6).
+    #[test]
+    fn reliability_error_codes_have_stable_wire_names() {
+        assert_eq!(
+            ErrorCode::SshKeepaliveTimeout.snake_case_name(),
+            "ssh_keepalive_timeout"
+        );
+        assert_eq!(
+            ErrorCode::SshTransportClosed.snake_case_name(),
+            "ssh_transport_closed"
+        );
+        assert_eq!(
+            ErrorCode::SshChannelOpenFailed.snake_case_name(),
+            "ssh_channel_open_failed"
+        );
+        assert_eq!(
+            ErrorCode::NetworkPathChanged.snake_case_name(),
+            "network_path_changed"
+        );
+        assert_eq!(
+            ErrorCode::ForegroundSessionInvalid.snake_case_name(),
+            "foreground_session_invalid"
+        );
+        assert_eq!(
+            ErrorCode::ViewerReloadFailed.snake_case_name(),
+            "viewer_reload_failed"
+        );
+    }
+
+    /// Mid-session closes map to retryable codes and distinguish keepalive
+    /// timeout from other transport closes (plan §5.4 / §5.6).
+    #[test]
+    fn session_closed_maps_to_retryable_transport_codes() {
+        let keepalive = AppError::Ssh(SshError::SessionClosed {
+            reason: SessionCloseReason::KeepaliveTimeout,
+        });
+        assert_eq!(keepalive.code(), ErrorCode::SshKeepaliveTimeout);
+        assert!(keepalive.code().auto_retryable());
+
+        let remote = AppError::Ssh(SshError::SessionClosed {
+            reason: SessionCloseReason::RemoteDisconnect,
+        });
+        assert_eq!(remote.code(), ErrorCode::SshTransportClosed);
+        assert!(remote.code().auto_retryable());
+
+        let net = AppError::Ssh(SshError::SessionClosed {
+            reason: SessionCloseReason::NetworkError,
+        });
+        assert_eq!(net.code(), ErrorCode::SshTransportClosed);
+        assert!(net.code().auto_retryable());
+    }
+
+    /// `SessionCloseReason` wire names are stable and non-sensitive.
+    #[test]
+    fn session_close_reason_wire_names_are_stable() {
+        assert_eq!(
+            SessionCloseReason::RemoteDisconnect.as_str(),
+            "remote_disconnect"
+        );
+        assert_eq!(
+            SessionCloseReason::KeepaliveTimeout.as_str(),
+            "keepalive_timeout"
+        );
+        assert_eq!(SessionCloseReason::NetworkError.as_str(), "network_error");
+        assert_eq!(SessionCloseReason::Unknown.as_str(), "unknown");
     }
 }

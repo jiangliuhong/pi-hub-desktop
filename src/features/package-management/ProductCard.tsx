@@ -1,106 +1,174 @@
-/**
- * A single product card (Pi / Pi Hub) in the package-management settings
- * (docs/requirements-v3.md §6.2, §18.2). Renders only the `allowed_actions`
- * computed by Rust; high-risk actions ask for a second confirmation
- * (AGENTS.md §11). Never shows shell commands or secrets (V3-SR-001/005).
- */
-
 import { useState } from "react";
 import {
   actionLabel,
   installStateLabel,
   isHighRisk,
   ownershipLabel,
-  productIdLabel,
   productDescription,
+  productIdLabel,
   sourceLabel,
   updateStatusLabel,
 } from "./labels";
-import type { ProductAction, ProductStatus } from "./types";
+import type { PackageErrorDto, ProductAction, ProductStatus } from "./types";
 
 export interface ProductCardProps {
   status: ProductStatus;
-  /** A global operation is in flight (disables non-cancel actions). */
+  loading: boolean;
   busy: boolean;
-  onAction: (action: ProductAction, product: ProductStatus["product"]) => void;
+  onAction: (
+    action: ProductAction,
+    product: ProductStatus["product"],
+  ) => Promise<void>;
+  /** Action error attributed to this product, surfaced in-card. */
+  actionError?: PackageErrorDto | null;
 }
 
-export function ProductCard({ status, busy, onAction }: ProductCardProps) {
+const PRIMARY_ACTIONS: ProductAction[] = [
+  "install",
+  "update",
+  "repair",
+  "cancel",
+  "confirm_restart",
+];
+const MAINTENANCE_ACTIONS: ProductAction[] = ["scan", "check_updates"];
+
+export function ProductCard({
+  status,
+  loading,
+  busy,
+  onAction,
+  actionError,
+}: ProductCardProps) {
   const [pendingAction, setPendingAction] = useState<ProductAction | null>(
     null,
   );
+  const [submitting, setSubmitting] = useState(false);
+  const [copied, setCopied] = useState(false);
   const current = status.current;
-  const allowed = status.allowed_actions;
+  const actions = status.allowed_actions.filter((action) =>
+    PRIMARY_ACTIONS.includes(action),
+  );
+  const maintenanceActions = status.allowed_actions.filter((action) =>
+    MAINTENANCE_ACTIONS.includes(action),
+  );
+  const packageName =
+    current?.package_name ??
+    (status.product === "pi"
+      ? "@earendil-works/pi-coding-agent"
+      : "@jarome/pi-hub");
+  const command = `npm install -g ${packageName}@latest --registry=https://registry.npmjs.org`;
+  const commandLabel = current ? "升级命令" : "安装命令";
 
   const handle = (action: ProductAction) => {
     if (isHighRisk(action)) {
       setPendingAction(action);
       return;
     }
-    onAction(action, status.product);
+    void onAction(action, status.product);
   };
 
-  const confirmPending = () => {
-    if (pendingAction) onAction(pendingAction, status.product);
-    setPendingAction(null);
+  const confirmPending = async () => {
+    if (!pendingAction) return;
+    setSubmitting(true);
+    try {
+      // Awaiting keeps the dialog open (with a loading affordance) until the
+      // backend either accepts the operation or the hook records an error.
+      // runWithGuard swallows rejections into the error state, so this promise
+      // always resolves — failures surface via `actionError` after close.
+      await onAction(pendingAction, status.product);
+      setPendingAction(null);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const copyCommand = async () => {
+    try {
+      await navigator.clipboard.writeText(command);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1600);
+    } catch {
+      setCopied(false);
+    }
   };
 
   return (
     <section className="pkg-card">
       <header className="pkg-card-header">
-        <h4>{productIdLabel(status.product)}</h4>
-        <span className={`pkg-state pkg-state-${status.install_state}`}>
-          {installStateLabel(status.install_state)}
-        </span>
-      </header>
-      <p className="pkg-description">{productDescription(status.product)}</p>
-
-      <dl className="pkg-facts">
         <div>
-          <dt>当前版本</dt>
-          <dd>{current?.version ?? "—"}</dd>
+          <h4>{productIdLabel(status.product)}</h4>
+          <p className="pkg-description">
+            {productDescription(status.product)}
+          </p>
         </div>
-        <div>
-          <dt>最新版本</dt>
-          <dd>{status.latest_version ?? "—"}</dd>
-        </div>
-        <div>
-          <dt>更新状态</dt>
-          <dd>{updateStatusLabel(status.update_status)}</dd>
-        </div>
-        {current ? (
-          <>
-            <div>
-              <dt>来源</dt>
-              <dd>
-                {sourceLabel(current.source)}（
-                {ownershipLabel(current.ownership)}）
-              </dd>
-            </div>
-            <div>
-              <dt>位置</dt>
-              <dd
-                className="pkg-path"
-                title={current.entrypoint ?? current.package_root}
+        <div className="pkg-card-controls">
+          <span className={`pkg-state pkg-state-${status.install_state}`}>
+            {installStateLabel(status.install_state)}
+          </span>
+          <div className="pkg-card-actions">
+            {maintenanceActions.map((action) => (
+              <button
+                key={action}
+                type="button"
+                className="pkg-btn pkg-btn-secondary"
+                aria-label={`${productIdLabel(status.product)} ${actionLabel(action)}`}
+                disabled={loading || busy}
+                onClick={() => handle(action)}
               >
-                {current.entrypoint ?? current.package_root ?? "—"}
-              </dd>
-            </div>
-          </>
-        ) : null}
+                {actionLabel(action)}
+              </button>
+            ))}
+          </div>
+        </div>
+      </header>
+
+      <dl className="pkg-summary">
+        <SummaryItem label="当前版本" value={currentVersionLabel(status)} />
+        <SummaryItem
+          label="最新版本"
+          value={status.latest_version ? `v${status.latest_version}` : "—"}
+          detail={updateStatusLabel(status.update_status)}
+        />
+        <SummaryItem
+          label="来源"
+          value={
+            current
+              ? `${sourceLabel(current.source)} · ${ownershipLabel(current.ownership)}`
+              : "—"
+          }
+        />
       </dl>
 
-      {status.issue ? (
-        <p className="pkg-issue" role="alert">
-          {status.issue.message}
-        </p>
+      {current ? (
+        <details className="pkg-path-details">
+          <summary>安装位置</summary>
+          <code title={current.entrypoint ?? current.executable}>
+            {current.entrypoint ??
+              current.executable ??
+              current.package_root ??
+              "—"}
+          </code>
+        </details>
       ) : null}
 
-      <div className="pkg-actions">
-        {allowed.length === 0 ? (
-          <span className="pkg-hint">无可用操作</span>
-        ) : (
-          allowed.map((action) => (
+      <div className="pkg-command-section">
+        <h5>{commandLabel}</h5>
+        <div className="pkg-command-row">
+          <code title={command}>{command}</code>
+          <button
+            type="button"
+            className="pkg-copy-btn"
+            aria-label={copied ? "已复制" : `复制${commandLabel}`}
+            title={copied ? "已复制" : "复制命令"}
+            onClick={() => void copyCommand()}
+          >
+            {copied ? (
+              <span className="pkg-copy-success">✓</span>
+            ) : (
+              <CopyIcon />
+            )}
+          </button>
+          {actions.map((action) => (
             <button
               key={action}
               type="button"
@@ -114,9 +182,23 @@ export function ProductCard({ status, busy, onAction }: ProductCardProps) {
             >
               {actionLabel(action)}
             </button>
-          ))
-        )}
+          ))}
+        </div>
       </div>
+
+      {actions.length === 0 ? (
+        <p className="pkg-hint">当前无需安装或升级。</p>
+      ) : null}
+      {status.issue ? (
+        <p className="pkg-issue" role="alert">
+          {status.issue.message}
+        </p>
+      ) : null}
+      {actionError ? (
+        <p className="pkg-issue" role="alert">
+          {actionError.message}
+        </p>
+      ) : null}
 
       {pendingAction ? (
         <div
@@ -132,13 +214,14 @@ export function ProductCard({ status, busy, onAction }: ProductCardProps) {
               {productIdLabel(status.product)}」吗？
             </p>
             <p className="pkg-confirm-note">
-              该操作不会修改你的外部安装；将安装 Desktop
-              受管副本并在验证后切换。
+              该操作会修改当前 Node.js 环境的 npm 全局包。Pi Hub
+              由本客户端管理并正在运行时，升级完成后会自动重启。
             </p>
             <div className="pkg-confirm-actions">
               <button
                 type="button"
                 className="pkg-btn pkg-btn-secondary"
+                disabled={submitting}
                 onClick={() => setPendingAction(null)}
               >
                 取消
@@ -146,14 +229,59 @@ export function ProductCard({ status, busy, onAction }: ProductCardProps) {
               <button
                 type="button"
                 className="pkg-btn"
-                onClick={confirmPending}
+                disabled={submitting}
+                onClick={() => void confirmPending()}
               >
-                确认
+                {submitting ? "处理中…" : "确认"}
               </button>
             </div>
           </div>
         </div>
       ) : null}
     </section>
+  );
+}
+
+function SummaryItem({
+  label,
+  value,
+  detail,
+}: {
+  label: string;
+  value: string;
+  detail?: string;
+}) {
+  return (
+    <div>
+      <dt>{label}</dt>
+      <dd>{value}</dd>
+      {detail ? <small>{detail}</small> : null}
+    </div>
+  );
+}
+
+function currentVersionLabel(status: ProductStatus): string {
+  if (status.current?.version) return `v${status.current.version}`;
+
+  switch (status.install_state) {
+    case "not_installed":
+      return "未安装";
+    case "unknown":
+      return "无法验证";
+    case "invalid":
+      return "安装损坏";
+    case "incompatible":
+      return "版本不兼容";
+    case "installed":
+      return "—";
+  }
+}
+
+function CopyIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="8" y="8" width="11" height="11" rx="2" />
+      <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" />
+    </svg>
   );
 }

@@ -70,6 +70,16 @@ impl ManagedProcess {
             None => true,
         }
     }
+
+    /// If the child has already exited, return its exit status (non-blocking).
+    /// This reaps a finished child's status without killing or waiting on a
+    /// live one. Returns `None` if the child is still running or absent.
+    pub fn exit_status_if_finished(&mut self) -> Option<std::process::ExitStatus> {
+        match self.child.as_mut() {
+            Some(c) => c.try_wait().ok().flatten(),
+            None => None,
+        }
+    }
 }
 
 /// The supervisor contract (design-v2 §11.1).

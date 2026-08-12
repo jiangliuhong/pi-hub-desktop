@@ -30,15 +30,15 @@ pub struct InstallSpec {
     pub product: ProductId,
     pub version: semver::Version,
     pub toolchain: NpmToolchain,
-    pub staging_dir: PathBuf,
+    pub target_prefix: PathBuf,
     pub cancel: CancellationToken,
     pub deadline: Duration,
 }
 
-/// Successful install result: the staging dir is populated and ready for
-/// verification.
+/// Successful install result: the npm global prefix is populated and ready
+/// for verification.
 pub struct InstallOutcome {
-    pub staging_dir: PathBuf,
+    pub target_prefix: PathBuf,
 }
 
 /// The installer contract (DI for tests).
@@ -66,19 +66,19 @@ impl PackageInstaller for TokioPackageInstaller {
 
         // Fixed, Rust-constructed argument vector (V3-SR-001, design §10).
         let npm_cli = spec.toolchain.npm_cli_js.clone();
-        let staging = spec.staging_dir.clone();
+        let global_prefix = spec.target_prefix.clone();
         let mut cmd = tokio::process::Command::new(&spec.toolchain.node_executable);
         cmd.arg(&npm_cli);
         cmd.arg("install");
-        cmd.arg("--prefix").arg(&staging);
-        cmd.arg("--no-save");
-        cmd.arg("--package-lock=false");
+        cmd.arg("--global");
+        cmd.arg("--prefix").arg(&global_prefix);
         cmd.arg("--ignore-scripts");
         cmd.arg("--no-audit");
         cmd.arg("--no-fund");
         cmd.arg("--omit=dev");
+        cmd.arg("--registry=https://registry.npmjs.org");
         cmd.arg(&version_spec);
-        cmd.current_dir(&staging);
+        cmd.current_dir(&global_prefix);
 
         // Put the Node directory first on PATH (mirrors the runtime supervisor).
         if let Some(node_dir) = spec.toolchain.node_executable.parent() {
@@ -136,7 +136,7 @@ impl PackageInstaller for TokioPackageInstaller {
                     &format!("npm install completed for {pkg}"),
                 );
                 Ok(InstallOutcome {
-                    staging_dir: staging,
+                    target_prefix: global_prefix,
                 })
             }
             WaitOutcome::Exited(code) => {
@@ -300,12 +300,14 @@ mod tests {
             npm_cli_js: npm_cli,
             npm_version: "10.8.2".into(),
             source: crate::local_runtime::model::InstallationSource::Manual,
+            global_prefix: staging.clone(),
+            global_root: staging.join("lib/node_modules"),
         };
         let spec = InstallSpec {
             product: ProductId::Pi,
             version: semver::Version::parse(version).unwrap(),
             toolchain,
-            staging_dir: staging.clone(),
+            target_prefix: staging.clone(),
             cancel: CancellationToken::new(),
             deadline: Duration::from_secs(30),
         };
@@ -342,7 +344,7 @@ mod tests {
         let npm_cli = dir.path().join("npm-cli.js");
         std::fs::write(
             &npm_cli,
-            "console.log('OPENAI_API_KEY=sk-leaked'); process.exit(0);",
+            "const a=process.argv.slice(2); if(!a.includes('--global') || !a.includes('--prefix') || !a.includes('--registry=https://registry.npmjs.org') || !a.includes('@earendil-works/pi-coding-agent@0.84.0')) process.exit(2); console.log('OPENAI_API_KEY=sk-leaked'); process.exit(0);",
         )
         .unwrap();
         let toolchain = NpmToolchain {
@@ -350,12 +352,14 @@ mod tests {
             npm_cli_js: npm_cli,
             npm_version: "10.8.2".into(),
             source: crate::local_runtime::model::InstallationSource::Manual,
+            global_prefix: staging.clone(),
+            global_root: staging.join("lib/node_modules"),
         };
         let spec = InstallSpec {
             product: ProductId::Pi,
             version: semver::Version::new(0, 84, 0),
             toolchain,
-            staging_dir: staging.clone(),
+            target_prefix: staging.clone(),
             cancel: CancellationToken::new(),
             deadline: Duration::from_secs(30),
         };
@@ -363,7 +367,7 @@ mod tests {
             .install(spec, shared as Arc<dyn OperationLogSink>)
             .await
             .unwrap();
-        assert_eq!(outcome.staging_dir, staging);
+        assert_eq!(outcome.target_prefix, staging);
         // The leaked key must be redacted in the captured log.
         let lines = log.recent(None);
         let joined = lines
@@ -403,13 +407,15 @@ mod tests {
             npm_cli_js: npm_cli,
             npm_version: "10.8.2".into(),
             source: crate::local_runtime::model::InstallationSource::Manual,
+            global_prefix: staging.clone(),
+            global_root: staging.join("lib/node_modules"),
         };
         let cancel = CancellationToken::new();
         let spec = InstallSpec {
             product: ProductId::Pi,
             version: semver::Version::new(0, 84, 0),
             toolchain,
-            staging_dir: staging,
+            target_prefix: staging,
             cancel: cancel.clone(),
             deadline: Duration::from_secs(30),
         };
