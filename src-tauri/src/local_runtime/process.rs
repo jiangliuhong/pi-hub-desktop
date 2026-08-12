@@ -250,7 +250,7 @@ async fn pump<R: tokio::io::AsyncRead + Unpin>(
 }
 
 #[cfg(unix)]
-fn signal_process_group(pgid: u32, sig: libc::c_int) -> std::io::Result<()> {
+pub(crate) fn signal_process_group(pgid: u32, sig: libc::c_int) -> std::io::Result<()> {
     // The child created its own group with pgid == pid (process_group(0)).
     // `killpg(pgid, sig)` is equivalent to `kill(-pgid, sig)` and targets the
     // whole subtree. We never broadcast to other system processes.

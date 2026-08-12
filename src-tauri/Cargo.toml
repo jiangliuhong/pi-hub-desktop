@@ -83,6 +83,23 @@ libc = "0.2"
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 security-framework = "3.7"
 
+# --- V3 package management (docs/requirements-v3.md §9) ---
+# Justification: the ReleaseClient must query the npm registry over HTTPS
+# with real certificate-chain validation (V3-SR-004: HTTPS + system trust,
+# never ignore cert errors). The V2 health probe is loopback-only (no TLS),
+# and std provides no HTTPS client. `reqwest` is the standard async HTTP
+# client; `rustls-tls` keeps it pure-Rust (no OpenSSL system dep) so it
+# builds and tests on Linux dev hosts while validating real cert chains.
+# Gated to non-iOS: V3 package management is macOS-only and iOS returns
+# `unsupported_platform` for every command (requirements-v3 §4.2), so the iOS
+# build must not pull in an HTTP/TLS stack.
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "json",
+    "gzip",
+] }
+
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util", "rt-multi-thread", "macros"] }
 tempfile = "3"

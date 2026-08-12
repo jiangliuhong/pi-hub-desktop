@@ -7,5 +7,6 @@
 pub mod connections;
 pub mod credentials;
 pub mod local_runtime;
+pub mod package_management;
 pub mod profiles;
 pub mod viewer;

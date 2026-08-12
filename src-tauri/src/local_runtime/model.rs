@@ -172,6 +172,10 @@ pub enum InstallationSource {
     Asdf,
     Mise,
     Manual,
+    /// V3: a Desktop-managed copy under the app's Application Support dir
+    /// (docs/requirements-v3.md §3.2). Reused by the package-management
+    /// detector to mark owned installations.
+    DesktopManaged,
 }
 
 impl InstallationSource {
@@ -186,6 +190,7 @@ impl InstallationSource {
             InstallationSource::Asdf => "asdf",
             InstallationSource::Mise => "mise",
             InstallationSource::Manual => "manual",
+            InstallationSource::DesktopManaged => "desktop_managed",
         }
     }
 }

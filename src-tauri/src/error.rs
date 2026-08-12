@@ -61,6 +61,24 @@ pub enum ErrorCode {
     LocalPortNotReleased,
     AutoStartSuppressed,
     LocalRuntimeCancelled,
+    // --- V3 package management codes (docs/requirements-v3.md §14) ---
+    PackagePlatformUnsupported,
+    PackageOperationInProgress,
+    PackageNodeUnavailable,
+    PackageNpmUnavailable,
+    PackageReleaseCheckFailed,
+    PackageReleaseInvalid,
+    PackageReleaseTokenExpired,
+    PackageInstallSpawnFailed,
+    PackageInstallFailed,
+    PackageInstallTimeout,
+    PackageVerificationFailed,
+    PackageActivationFailed,
+    PackageUpdateRequiresRestart,
+    PackageExternalRuntimeActive,
+    PackageRollbackFailed,
+    PackageCancelled,
+    PackageDiskSpaceInsufficient,
 }
 
 impl ErrorCode {
@@ -114,7 +132,27 @@ impl ErrorCode {
             | ErrorCode::LocalProcessStopTimeout
             | ErrorCode::LocalPortNotReleased
             | ErrorCode::AutoStartSuppressed
-            | ErrorCode::LocalRuntimeCancelled => false,
+            | ErrorCode::LocalRuntimeCancelled
+            // V3 package management errors are never auto-retried by the V1
+            // connection backoff path; the manager owns operation state and
+            // exposes explicit retry semantics.
+            | ErrorCode::PackagePlatformUnsupported
+            | ErrorCode::PackageOperationInProgress
+            | ErrorCode::PackageNodeUnavailable
+            | ErrorCode::PackageNpmUnavailable
+            | ErrorCode::PackageReleaseCheckFailed
+            | ErrorCode::PackageReleaseInvalid
+            | ErrorCode::PackageReleaseTokenExpired
+            | ErrorCode::PackageInstallSpawnFailed
+            | ErrorCode::PackageInstallFailed
+            | ErrorCode::PackageInstallTimeout
+            | ErrorCode::PackageVerificationFailed
+            | ErrorCode::PackageActivationFailed
+            | ErrorCode::PackageUpdateRequiresRestart
+            | ErrorCode::PackageExternalRuntimeActive
+            | ErrorCode::PackageRollbackFailed
+            | ErrorCode::PackageCancelled
+            | ErrorCode::PackageDiskSpaceInsufficient => false,
         }
     }
 
@@ -164,6 +202,23 @@ impl ErrorCode {
             ErrorCode::LocalPortNotReleased => "local_port_not_released",
             ErrorCode::AutoStartSuppressed => "auto_start_suppressed",
             ErrorCode::LocalRuntimeCancelled => "local_runtime_cancelled",
+            ErrorCode::PackagePlatformUnsupported => "package_platform_unsupported",
+            ErrorCode::PackageOperationInProgress => "package_operation_in_progress",
+            ErrorCode::PackageNodeUnavailable => "package_node_unavailable",
+            ErrorCode::PackageNpmUnavailable => "package_npm_unavailable",
+            ErrorCode::PackageReleaseCheckFailed => "package_release_check_failed",
+            ErrorCode::PackageReleaseInvalid => "package_release_invalid",
+            ErrorCode::PackageReleaseTokenExpired => "package_release_token_expired",
+            ErrorCode::PackageInstallSpawnFailed => "package_install_spawn_failed",
+            ErrorCode::PackageInstallFailed => "package_install_failed",
+            ErrorCode::PackageInstallTimeout => "package_install_timeout",
+            ErrorCode::PackageVerificationFailed => "package_verification_failed",
+            ErrorCode::PackageActivationFailed => "package_activation_failed",
+            ErrorCode::PackageUpdateRequiresRestart => "package_update_requires_restart",
+            ErrorCode::PackageExternalRuntimeActive => "package_external_runtime_active",
+            ErrorCode::PackageRollbackFailed => "package_rollback_failed",
+            ErrorCode::PackageCancelled => "package_cancelled",
+            ErrorCode::PackageDiskSpaceInsufficient => "package_disk_space_insufficient",
         }
     }
 }
@@ -195,6 +250,9 @@ pub enum AppError {
     #[error("local runtime error: {0}")]
     LocalRuntime(#[from] LocalRuntimeError),
 
+    #[error("package management error: {0}")]
+    PackageManagement(#[from] PackageManagementError),
+
     #[error("operation cancelled")]
     Cancelled,
 }
@@ -211,6 +269,7 @@ impl AppError {
             AppError::Viewer(e) => e.code(),
             AppError::Platform(e) => e.code(),
             AppError::LocalRuntime(e) => e.code(),
+            AppError::PackageManagement(e) => e.code(),
             AppError::Cancelled => ErrorCode::Cancelled,
         }
     }
@@ -252,6 +311,7 @@ impl AppError {
             AppError::Viewer(e) => e.user_message(),
             AppError::Platform(e) => e.user_message(),
             AppError::LocalRuntime(e) => e.user_message(),
+            AppError::PackageManagement(e) => e.user_message(),
             AppError::Cancelled => "操作已取消。".to_string(),
         }
     }
@@ -680,6 +740,170 @@ impl LocalRuntimeError {
                 details.insert("exitCode".into(), c.to_string());
             }
             LocalRuntimeError::ProcessExitedEarly { exit_code: None } => {}
+            _ => {}
+        }
+        dto.details = details;
+        dto
+    }
+}
+
+/// V3 package management domain errors (docs/requirements-v3.md §14, §16).
+///
+/// Each variant carries only non-sensitive context (product, stage, version,
+/// bytes). npm stderr, registry raw output, full environment and any secret
+/// are never stored here (AGENTS.md §6.1, V3-SR-005).
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum PackageManagementError {
+    #[error("package management is not supported on this platform")]
+    UnsupportedPlatform,
+    #[error("another package operation is already in progress")]
+    OperationInProgress,
+    #[error("node.js is unavailable or incompatible for package operations")]
+    NodeUnavailable,
+    #[error("npm cli is unavailable or invalid")]
+    NpmUnavailable,
+    #[error("release metadata check failed for {product}")]
+    ReleaseCheckFailed { product: String },
+    #[error("release metadata for {product} is invalid")]
+    ReleaseInvalid { product: String },
+    #[error("release token is expired or unknown")]
+    ReleaseTokenExpired,
+    #[error("npm install failed to spawn")]
+    InstallSpawnFailed,
+    #[error("npm install failed for {product} (exit code {exit_code:?})")]
+    InstallFailed {
+        product: String,
+        exit_code: Option<i32>,
+    },
+    #[error("npm install timed out for {product}")]
+    InstallTimeout { product: String },
+    #[error("post-install verification failed for {product}: {reason}")]
+    VerificationFailed { product: String, reason: String },
+    #[error("activation failed for {product}: {reason}")]
+    ActivationFailed { product: String, reason: String },
+    #[error("pi hub update requires restart confirmation")]
+    UpdateRequiresRestart,
+    #[error("an external pi hub is currently running")]
+    ExternalRuntimeActive,
+    #[error("rollback failed for {product}: {reason}")]
+    RollbackFailed { product: String, reason: String },
+    #[error("package operation cancelled")]
+    Cancelled,
+    #[error("disk space is insufficient (required {required_bytes} bytes)")]
+    DiskSpaceInsufficient { required_bytes: u64 },
+    #[error("package management internal error: {0}")]
+    Internal(String),
+}
+
+impl PackageManagementError {
+    pub fn code(&self) -> ErrorCode {
+        match self {
+            PackageManagementError::UnsupportedPlatform => ErrorCode::PackagePlatformUnsupported,
+            PackageManagementError::OperationInProgress => ErrorCode::PackageOperationInProgress,
+            PackageManagementError::NodeUnavailable => ErrorCode::PackageNodeUnavailable,
+            PackageManagementError::NpmUnavailable => ErrorCode::PackageNpmUnavailable,
+            PackageManagementError::ReleaseCheckFailed { .. } => {
+                ErrorCode::PackageReleaseCheckFailed
+            }
+            PackageManagementError::ReleaseInvalid { .. } => ErrorCode::PackageReleaseInvalid,
+            PackageManagementError::ReleaseTokenExpired => ErrorCode::PackageReleaseTokenExpired,
+            PackageManagementError::InstallSpawnFailed => ErrorCode::PackageInstallSpawnFailed,
+            PackageManagementError::InstallFailed { .. } => ErrorCode::PackageInstallFailed,
+            PackageManagementError::InstallTimeout { .. } => ErrorCode::PackageInstallTimeout,
+            PackageManagementError::VerificationFailed { .. } => {
+                ErrorCode::PackageVerificationFailed
+            }
+            PackageManagementError::ActivationFailed { .. } => ErrorCode::PackageActivationFailed,
+            PackageManagementError::UpdateRequiresRestart => {
+                ErrorCode::PackageUpdateRequiresRestart
+            }
+            PackageManagementError::ExternalRuntimeActive => {
+                ErrorCode::PackageExternalRuntimeActive
+            }
+            PackageManagementError::RollbackFailed { .. } => ErrorCode::PackageRollbackFailed,
+            PackageManagementError::Cancelled => ErrorCode::PackageCancelled,
+            PackageManagementError::DiskSpaceInsufficient { .. } => {
+                ErrorCode::PackageDiskSpaceInsufficient
+            }
+            PackageManagementError::Internal(_) => ErrorCode::Internal,
+        }
+    }
+
+    fn user_message(&self) -> String {
+        match self {
+            PackageManagementError::UnsupportedPlatform => {
+                "当前平台不支持本机组件包管理。".to_string()
+            }
+            PackageManagementError::OperationInProgress => {
+                "已有包管理操作正在进行，请稍候。".to_string()
+            }
+            PackageManagementError::NodeUnavailable => {
+                "未找到可用的 Node.js，无法执行受管安装。请先安装或选择 Node.js。".to_string()
+            }
+            PackageManagementError::NpmUnavailable => {
+                "未找到可用的 npm，无法执行受管安装。请确认 Node.js 附带 npm。".to_string()
+            }
+            PackageManagementError::ReleaseCheckFailed { product } => {
+                format!("无法获取 {product} 的最新版本信息，请检查网络后重试。")
+            }
+            PackageManagementError::ReleaseInvalid { product } => {
+                format!("{product} 的版本元数据不合法，暂不可安装。")
+            }
+            PackageManagementError::ReleaseTokenExpired => {
+                "版本选择已过期，请重新检查更新。".to_string()
+            }
+            PackageManagementError::InstallSpawnFailed => "无法启动 npm 安装进程。".to_string(),
+            PackageManagementError::InstallFailed { product, .. } => {
+                format!("{product} 安装失败，已清理临时文件，未改动现有安装。")
+            }
+            PackageManagementError::InstallTimeout { product } => {
+                format!("{product} 安装超时，已取消并清理。")
+            }
+            PackageManagementError::VerificationFailed { product, .. } => {
+                format!("{product} 安装后校验失败，未激活，现有版本保持不变。")
+            }
+            PackageManagementError::ActivationFailed { product, .. } => {
+                format!("{product} 激活失败，已尝试回滚。")
+            }
+            PackageManagementError::UpdateRequiresRestart => {
+                "Pi Hub 更新需要确认后重启。".to_string()
+            }
+            PackageManagementError::ExternalRuntimeActive => {
+                "检测到外部启动的 Pi Hub 正在运行，不会停止它；可稍后激活受管副本。".to_string()
+            }
+            PackageManagementError::RollbackFailed { product, .. } => {
+                format!("{product} 回滚失败，请手动处理。")
+            }
+            PackageManagementError::Cancelled => "包管理操作已取消。".to_string(),
+            PackageManagementError::DiskSpaceInsufficient { .. } => {
+                "磁盘空间不足，请清理后重试。".to_string()
+            }
+            PackageManagementError::Internal(_) => "包管理发生内部错误。".to_string(),
+        }
+    }
+
+    /// Build a serializable DTO with allowlisted non-sensitive details.
+    pub fn to_dto_with_details(&self) -> ErrorDto {
+        let mut dto = AppError::PackageManagement(self.clone()).to_dto();
+        let mut details = BTreeMap::new();
+        match self {
+            PackageManagementError::ReleaseCheckFailed { product }
+            | PackageManagementError::ReleaseInvalid { product }
+            | PackageManagementError::InstallTimeout { product }
+            | PackageManagementError::VerificationFailed { product, .. }
+            | PackageManagementError::ActivationFailed { product, .. }
+            | PackageManagementError::RollbackFailed { product, .. } => {
+                details.insert("product".into(), product.clone());
+            }
+            PackageManagementError::InstallFailed { product, exit_code } => {
+                details.insert("product".into(), product.clone());
+                if let Some(c) = exit_code {
+                    details.insert("exitCode".into(), c.to_string());
+                }
+            }
+            PackageManagementError::DiskSpaceInsufficient { required_bytes } => {
+                details.insert("requiredBytes".into(), required_bytes.to_string());
+            }
             _ => {}
         }
         dto.details = details;

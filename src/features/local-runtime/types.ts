@@ -29,7 +29,8 @@ export type InstallationSource =
   | "fnm"
   | "asdf"
   | "mise"
-  | "manual";
+  | "manual"
+  | "desktop_managed";
 
 export type CheckCategory =
   | "runtime"

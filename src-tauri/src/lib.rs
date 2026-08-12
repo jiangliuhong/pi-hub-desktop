@@ -20,6 +20,7 @@ pub mod credential;
 pub mod error;
 pub mod event;
 pub mod local_runtime;
+pub mod package_management;
 pub mod platform;
 pub mod profile;
 pub mod ssh;
@@ -85,6 +86,16 @@ pub fn resolve_local_runtime_store_path() -> PathBuf {
         return dir.join("local-runtime.json");
     }
     PathBuf::from("local-runtime.json")
+}
+
+/// Locate the on-disk managed packages root (V3 design §5.2):
+/// `~/Library/Application Support/Pi Hub Client/packages/`.
+pub fn resolve_packages_root() -> PathBuf {
+    if let Some(dir) = dirs_config_dir() {
+        let _ = std::fs::create_dir_all(&dir);
+        return dir.join("packages");
+    }
+    PathBuf::from("packages")
 }
 
 /// Build the managed state graph (profile store + credential store +
@@ -204,11 +215,40 @@ pub fn run() {
             });
             let credentials = credential_store.clone();
             let manager = Arc::new(LocalRuntimeManager::platform_default(
-                local_settings,
+                local_settings.clone(),
                 credentials,
-                Arc::new(TauriBroadcaster::new(handle)),
+                Arc::new(TauriBroadcaster::new(handle.clone())),
             ));
             app.manage(manager.clone());
+
+            // V3 package management manager (macOS; iOS builds but every op
+            // returns `unsupported_platform`). Built after the runtime manager
+            // so Pi Hub activation can delegate to it (design §19.1).
+            let pkg_store = std::sync::Arc::new(
+                crate::package_management::managed_store::ManagedPackageStore::new(
+                    resolve_packages_root(),
+                ),
+            );
+            {
+                let s = pkg_store.clone();
+                tauri::async_runtime::block_on(async move {
+                    let _ = s.load().await;
+                    let _ = s.ensure_layout().await;
+                    s.cleanup_stale_staging(chrono::Utc::now()).await;
+                });
+            }
+            let pkg_manager = std::sync::Arc::new(
+                crate::package_management::manager::PackageManagementManager::platform_default(
+                    pkg_store,
+                    local_settings.clone(),
+                    Some(manager.clone()),
+                    std::sync::Arc::new(crate::package_management::manager::TauriBroadcaster::new(
+                        handle,
+                    )),
+                ),
+            );
+            app.manage(pkg_manager);
+
             // Async app-launch init: scan + optional auto-start (design-v2 §14.1).
             let init_manager = manager.clone();
             tauri::async_runtime::spawn(async move {
@@ -257,6 +297,16 @@ pub fn run() {
             commands::local_runtime::update_local_runtime_settings,
             commands::local_runtime::get_local_runtime_logs,
             commands::local_runtime::clear_local_runtime_logs,
+            commands::package_management::get_package_management_platform_support,
+            commands::package_management::get_package_management_status,
+            commands::package_management::scan_managed_products,
+            commands::package_management::check_product_updates,
+            commands::package_management::start_product_install,
+            commands::package_management::start_product_update,
+            commands::package_management::confirm_pi_hub_update_restart,
+            commands::package_management::cancel_package_operation,
+            commands::package_management::activate_managed_product,
+            commands::package_management::get_package_operation_log,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Pi Hub Client");
@@ -269,20 +319,35 @@ pub fn run() {
     // intentionally NOT handled here.
     app.run(|app_handle, event| {
         if let tauri::RunEvent::ExitRequested { .. } = event {
-            if let Some(manager) = app_handle.try_state::<Arc<LocalRuntimeManager>>() {
-                let manager = manager.inner().clone();
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build();
-                if let Ok(rt) = rt {
-                    rt.block_on(async move {
+            // Bound shutdown on a dedicated current-thread runtime so a hung
+            // child can't block exit indefinitely (design-v2 §14.3).
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            if let Ok(rt) = rt {
+                rt.block_on(async move {
+                    if let Some(manager) =
+                        app_handle.try_state::<Arc<LocalRuntimeManager>>()
+                    {
+                        let manager = manager.inner().clone();
                         let _ = tokio::time::timeout(
-                            std::time::Duration::from_secs(8),
+                            std::time::Duration::from_secs(6),
                             manager.on_app_exit(),
                         )
                         .await;
-                    });
-                }
+                    }
+                    // V3: cancel + clean up any in-flight package op.
+                    if let Some(pkg) = app_handle
+                        .try_state::<Arc<crate::package_management::manager::PackageManagementManager>>()
+                    {
+                        let pkg = pkg.inner().clone();
+                        let _ = tokio::time::timeout(
+                            std::time::Duration::from_secs(4),
+                            pkg.on_app_exit(),
+                        )
+                        .await;
+                    }
+                });
             }
         }
     });

@@ -81,6 +81,7 @@ export function sourceLabel(source: InstallationSource): string {
     asdf: "ASDF",
     mise: "Mise",
     manual: "手动选择",
+    desktop_managed: "Desktop 受管",
   };
   return map[source];
 }

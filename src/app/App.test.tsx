@@ -27,6 +27,9 @@ describe("App", () => {
       if (command === "get_local_runtime_platform_support") {
         return Promise.resolve(false);
       }
+      if (command === "get_package_management_platform_support") {
+        return Promise.resolve(false);
+      }
       return Promise.resolve([]);
     });
   });
