@@ -6,8 +6,10 @@
 - `docs/design-v1.md`
 - `docs/requirements-v2.md`
 - `docs/design-v2.md`
+- `docs/requirements-v3.md`
+- `docs/pi-and-pi-hub-package-management-design.md`
 
-V1 文档定义远程 Pi Hub 连接能力；V2 文档定义 macOS 本机 Pi Hub 管理与 Pi 环境诊断。实现与文档冲突时，先修正文档或明确记录设计决策，不得静默扩大范围。
+V1 文档定义远程 Pi Hub 连接能力；V2 文档定义 macOS 本机 Pi Hub 管理与 Pi 环境诊断；V3 文档定义 macOS 本机 Pi / Pi Hub 组件的检测、版本检查、受管安装与更新。实现与文档冲突时，先修正文档或明确记录设计决策，不得静默扩大范围。
 
 ---
 
@@ -32,6 +34,14 @@ V1 文档定义远程 Pi Hub 连接能力；V2 文档定义 macOS 本机 Pi Hub 
 4. 检查 Pi Hub 内嵌 Pi Runtime、Agent 目录、Session、认证和模型基础状态。
 5. 按用户设置在打开 Desktop 时自动启动本机 Pi Hub。
 
+### V3
+
+1. 分别检测本机 Pi 与 Pi Hub 的安装、来源、版本与更新状态。
+2. 联网检查 stable 最新版本（缓存、离线降级、不降级）。
+3. 在 Desktop 受管目录内安装或更新 Pi / Pi Hub（不修改用户外部环境，不请求 `sudo`）。
+4. 安装/更新使用固定包名、固定参数、原子激活、失败回滚与有限脱敏日志。
+5. 与 V2 Local Runtime 启停、Doctor、外部进程识别集成；iOS 不提供本机组件管理。
+
 核心业务仍由 `pi-hub / pi-web` 提供。本仓库不得复制 Pi Hub 的会话、Agent、Scheduler、Workspace、模型或认证业务实现。
 
 ---
@@ -45,7 +55,7 @@ V1 文档定义远程 Pi Hub 连接能力；V2 文档定义 macOS 本机 Pi Hub 
 
 必须使用同一个 Tauri 2 工程和同一套 React / TypeScript 前端。共享逻辑优先放在 Rust 中，平台差异通过明确适配层处理。
 
-V2 本机 Runtime 管理只在 macOS 生效；iOS 必须继续编译并保持 V1 功能，不得启动本地进程或显示本机 Runtime 管理入口。
+V2 本机 Runtime 与 V3 本机组件包管理只在 macOS 生效；iOS 必须继续编译并保持 V1 / V2 功能，不得启动本地进程或显示本机 Runtime / 本机组件管理入口。
 
 ### 2.2 V1 服务类型
 
@@ -72,11 +82,12 @@ V2 本机 Runtime 管理只在 macOS 生效；iOS 必须继续编译并保持 V1
 - 后台永久维持 iOS Tunnel
 - macOS 登录项、LaunchAgent 或 LaunchDaemon
 - Desktop 退出后长期常驻 Pi Hub
-- 自动安装或升级 Node.js、Pi、Pi Hub
+- 自动安装或升级 Node.js（V3 仍是非目标；Pi / Pi Hub 的受管安装与更新已纳入 V3，必须按 `docs/requirements-v3.md` 与本文件 §9 规则执行）
 - 任意 Shell 启动命令或环境变量编辑器
 - Mac App Store 沙盒适配
+- 后台静默更新、beta / 预发布通道、覆盖用户外部全局安装或写入系统目录（V3 非目标）
 
-发现这些需求时，应记录到后续版本，不得顺手实现。
+发现这些需求时，应记录到后续版本，不得顺手实现。V3 范围内的安装/更新能力必须严格遵守本文件 §9 与 `docs/requirements-v3.md`，不得静默扩大范围。
 
 ---
 
@@ -117,7 +128,8 @@ pi-hub-desktop/
 │   │   ├── services/
 │   │   ├── connection/
 │   │   ├── viewer/
-│   │   └── local-runtime/       # V2 macOS UI
+│   │   ├── local-runtime/       # V2 macOS UI
+│   │   └── package-management/  # V3 macOS UI
 │   ├── components/
 │   ├── lib/
 │   └── types/
@@ -131,6 +143,7 @@ pi-hub-desktop/
 │   │   ├── ssh/
 │   │   ├── viewer/
 │   │   ├── local_runtime/       # V2 本机 Runtime 领域
+│   │   ├── package_management/  # V3 本机组件包管理领域
 │   │   ├── platform/
 │   │   ├── error.rs
 │   │   └── lib.rs
@@ -204,6 +217,24 @@ SIGTERM / SIGINT 子进程转发
 
 Desktop 不得以解析 `Ready` 文本、扫描 Pi Hub `node_modules` 内部结构或猜测端口内容作为长期方案。
 
+V3 受管安装复用上述 Pi Hub CLI 契约（`--version --json`、Doctor）做后置验证；并依赖 npm registry `dist-tags.latest` 与包发布物在 `--ignore-scripts` 下可运行（契约确认与开放前提见 `docs/requirements-v3.md` §17）。
+
+### 5.6 本机组件包管理领域（V3）
+
+Pi / Pi Hub 的检测、版本检查、受管安装与更新是独立领域，不与 V2 Runtime 启停混在一起：
+
+```text
+PackageManagementManager
+├── InstallationDetector（复用并扩展 V2 候选验证）
+├── ReleaseClient
+├── NpmToolchainDetector
+├── PackageInstaller
+├── PostInstallVerifier
+└── ManagedPackageStore
+```
+
+包管理器不复制 Pi Hub 进程管理逻辑；Pi Hub 激活、停止和重启通过最小适配接口委托给 `LocalRuntimeManager`。
+
 ---
 
 ## 6. 安全硬规则
@@ -255,7 +286,7 @@ Pi Hub WebView 按不可信内容处理：
 - 外部链接默认交给系统浏览器。
 - 只允许当前服务 origin 和经过验证的内部导航。
 
-新增 V2 Runtime Commands 后，也不得授予 Service WebView 调用权限。
+新增 V2 Runtime 或 V3 包管理 Commands 后，也不得授予 Service WebView 调用权限。
 
 ### 6.5 HTTP / TLS
 
@@ -273,6 +304,8 @@ Pi Hub WebView 按不可信内容处理：
 - 启动参数由 Rust 固定构造。
 - 只终止当前 App 内存中持有 Child Handle 的进程组。
 - 不根据端口、进程名或 PID 猜测进程所有权。
+
+V3 的 npm 安装子进程同样适用本节：只能执行验证过的绝对 Node/npm CLI，参数由 Rust 固定构造，只终止 manager 持有 Handle 的 npm 进程组，不按 PID/端口/进程名猜测所有权。
 
 ---
 
@@ -403,12 +436,75 @@ Desktop 只解析白名单字段，不把 stdout 原文直接暴露给 UI。
 
 ---
 
-## 9. 生命周期规则
+## 9. V3 本机组件包管理规则
+
+V3 在 V2 之外新增“本机组件管理”（Pi 与 Pi Hub 的检测、版本检查、受管安装与更新）。完整需求见 `docs/requirements-v3.md`，技术设计见 `docs/pi-and-pi-hub-package-management-design.md`。
+
+### 9.1 范围与前置条件
+
+- V3 把 V2 “不自动安装/升级 Pi、Pi Hub” 的约束升级为“按 V3 文档规则受管安装/升级”。
+- Node.js 自动安装/升级在 V3 仍是非目标；Node.js 缺失或 npm 不可用时安装/更新被阻断。
+- beta/预发布通道、后台静默更新、覆盖外部全局安装、写入系统目录或 `sudo` 均为非目标。
+
+### 9.2 受管副本模型
+
+- 安装或更新目标始终是 Desktop 自己的用户级受管目录，不原地修改用户 Homebrew/NVM/Volta 等外部安装。
+- 外部安装继续展示，更新动作是“安装受管版本”，不得暗示外部环境被修改。
+- 两个产品（Pi / Pi Hub）隔离安装，manifest、staging、版本目录和日志相互独立。
+
+### 9.3 固定包名与命令
+
+- 包名来自 `ProductId` 固定映射，版本来自后端短期 release token。
+- 前端不得传 package、version spec、registry、命令、参数、PID、路径或环境。
+- npm 安装等价于 `<absolute-node> <absolute-npm-cli.js> install --prefix <staging> --no-save --package-lock=false --ignore-scripts --no-audit --no-fund --omit=dev <allowlisted-package>@<exact-version>`。
+- 参数由 Rust 固定构造，stdin 关闭，输出有界并脱敏。
+
+### 9.4 原子激活与回滚
+
+- 同文件系统写临时 manifest，`fsync` 后 rename；版本目录由 staging rename。
+- 后置验证失败删除 staging，active manifest 不变。
+- 禁止在 active 目录原地 npm install、先删除旧版本或仅用 symlink 表达事务。
+- Pi Hub 新版本启动失败必须恢复旧 active 版本并报告回滚结果。
+
+### 9.5 进程所有权与 Runtime 协调
+
+- 包管理器不自行 Kill Pi Hub；Pi Hub 激活、停止和重启复用 `LocalRuntimeManager`。
+- `running_managed` 更新需用户确认“更新并重启”；`running_external` 只下载受管副本，不停止外部进程。
+- npm 安装子进程本身也是受管子进程，只终止 manager 持有 Handle 的进程组。
+
+### 9.6 版本与 Registry
+
+- 固定官方公共 registry，HTTPS + 系统证书校验，不忽略证书错误。
+- 只读 `latest` stable dist-tag；semver 比较，禁止字符串比较。
+- 当前版本高于 latest 时显示 `newer_than_latest`，禁止降级。
+- 不得把 registry 原文传给前端或日志。
+
+### 9.7 文件系统与数据隔离
+
+- 写入必须位于 canonicalized 受管根；拒绝 `..`、跨根 symlink 和非预期路径。
+- package symlink 不得逃逸受管根。
+- 不写入或迁移 `~/.pi/agent` 会话、认证与 Session 数据。
+
+### 9.8 日志与脱敏
+
+- 安装操作日志有固定行数和大小上限，保留最近 10 次或 30 天。
+- 不得记录完整环境、对话、Session、模型请求或凭据。
+- 必须脱敏 Authorization、API Key、Cookie、Token、npm token、Private Key；不允许主动打印 Secret 后只依赖正则擦除。
+
+### 9.9 iOS 门控
+
+- iOS 不显示“本机组件”入口，不扫描 Node/npm，不启动安装事务。
+- 包管理 Tauri Command 在 iOS 返回稳定 `unsupported_platform`。
+
+---
+
+## 10. 生命周期规则
 
 ### macOS
 
 - V1 SSH 连接可持续到用户断开或 App 退出。
 - V2 本机 Runtime 按设置在 App 打开时检查/启动。
+- V3 受管安装/更新按用户显式操作执行；App 退出时取消进行中的安装事务并有界清理 staging，不长期常驻。
 - 退出时释放 SSH、Listener 和受管进程资源。
 - 当前版本不注册 LaunchAgent。
 
@@ -418,11 +514,11 @@ Desktop 只解析白名单字段，不把 stdout 原文直接暴露给 UI。
 - 不承诺后台持续 SSH。
 - 回前台检测并重连。
 - 不使用伪造后台模式。
-- V2 本机 Runtime 命令返回 `unsupported_platform`，UI 隐藏入口。
+- V2 本机 Runtime 与 V3 包管理命令返回 `unsupported_platform`，UI 隐藏入口。
 
 ---
 
-## 10. 错误与状态
+## 11. 错误与状态
 
 所有状态必须使用明确枚举，不得散落字符串。
 
@@ -457,11 +553,13 @@ port_conflict
 failed
 ```
 
+V3 包管理状态必须使用明确枚举（安装状态、更新状态、操作阶段）并提供稳定错误码；完整清单见 `docs/requirements-v3.md` §7 与 §14。
+
 错误必须提供稳定错误码和下一步建议。Rust 业务路径禁止 `unwrap()`、`expect()` 和无说明 panic；可恢复错误统一使用 typed error。
 
 ---
 
-## 11. 前端规则
+## 12. 前端规则
 
 - TypeScript strict，禁止无说明 `any`。
 - iOS 和 macOS 使用响应式共享 UI。
@@ -472,21 +570,23 @@ failed
 - macOS 服务列表顶部使用固定 `This Mac` 卡片，不把它保存为远程 Profile。
 - blocked 时禁止启动；degraded 时允许启动但明确提示。
 - external 状态默认不显示停止和重启操作。
+- V3：UI 不自行推导安装/更新权限，`allowed_actions` 由 Rust 计算；external Pi Hub 不显示强制切换；iOS 隐藏“本机组件”入口。
 
 ---
 
-## 12. 数据与迁移
+## 13. 数据与迁移
 
 - ID 使用稳定 UUID。
 - 所有配置包含 `schema_version`。
 - 结构变化提供向前迁移，不清空用户配置。
 - 敏感字段不进入序列化模型。
-- V1 Profiles 与 V2 Local Runtime Settings 使用独立存储和迁移。
+- V1 Profiles、V2 Local Runtime Settings 与 V3 package-management store 使用各自独立存储和迁移。
 - 安装路径保存前 canonicalize，使用前重新验证。
+- V3 store 不保存任何 Secret；继续读取 V2 `local-runtime.json` 路径。
 
 ---
 
-## 13. 测试规则
+## 14. 测试规则
 
 ### V1
 
@@ -513,6 +613,24 @@ failed
 - crash-loop protection。
 - 日志限制和 redaction。
 
+### V3 单元与集成
+
+至少覆盖：
+
+- Pi 与 Pi Hub 包 identity、bin、version、engine。
+- managed/external 分类与 not_installed/invalid/incompatible 区分。
+- semver、prerelease、newer-than-latest。
+- registry 白名单、ETag、TTL、离线缓存。
+- release token 绑定和过期。
+- npm 与 Node 配对及固定参数无 Shell。
+- staging/symlink 路径逃逸。
+- manifest 原子写、迁移、损坏恢复。
+- generation、重复操作、取消只终止受管 npm child。
+- 日志上限和 Secret 脱敏。
+- 旧版本引用保护和清理。
+- 两者均缺失一键安装、部分完成、回滚成功/失败。
+- mock registry / mock npm / mock client-info 集成。
+
 ### macOS 真机
 
 至少验证：
@@ -528,18 +646,19 @@ failed
 - 无认证 / 无模型。
 - `Cmd + Q`。
 - Developer ID 签名、公证和 DMG。
+- V3：两者均无 / 单个 / 均有外部旧版本 / 已有受管版本、Node 过低或 npm 缺失、无网络或 registry 5xx、磁盘不足或目录不可写、managed/external/port conflict 更新与回滚、签名后受管目录权限。
 
 ### iOS 回归
 
-V2 合并后仍需验证 iOS build、Direct URL、SSH Forward、Host Key、Viewer 和 Keychain。
+V2 / V3 合并后仍需验证 iOS build、Direct URL、SSH Forward、Host Key、Viewer 和 Keychain；iOS 不显示本机组件入口，包管理命令返回稳定错误。
 
-涉及 SSH、Keychain、WebView、进程或生命周期的修改，必须说明实际验证平台。
+涉及 SSH、Keychain、WebView、进程、npm 安装或生命周期的修改，必须说明实际验证平台。
 
 ---
 
-## 14. 开发流程
+## 15. 开发流程
 
-1. 确认任务属于 V1 或 V2。
+1. 确认任务属于 V1、V2 或 V3。
 2. 阅读对应需求与设计章节。
 3. 检查现有实现和测试。
 4. 跨仓库契约先在 Pi Hub 实现，不写临时猜测逻辑。
@@ -561,10 +680,12 @@ V2 合并后仍需验证 iOS build、Direct URL、SSH Forward、Host Key、Viewe
 - 使用固定 sleep 伪造 ready
 - Kill 不属于当前 App 的进程
 - 把外部 `pi` CLI 变成错误的硬依赖
+- 用 `sh -c` / shell 拼接执行 npm、前端提交任意 package/version/参数
+- 原地修改用户外部安装或请求 `sudo`
 
 ---
 
-## 15. 预期检查命令
+## 16. 预期检查命令
 
 ```bash
 npm run format:check
@@ -581,21 +702,21 @@ npm run tauri ios build
 
 证书或真机环境不足时可以无法执行最后两项，但必须明确说明，不能声称完成验证。
 
-涉及 `jiangliuhong/pi-hub` 的 V2 契约时，还必须运行该仓库的 typecheck、lint、test 和发布前构建检查。
+涉及 `jiangliuhong/pi-hub` 的 V2 / V3 契约（Doctor、版本命令、`--ignore-scripts` 可运行性）时，还必须运行该仓库与相关 Pi 包的 typecheck、lint、test 和发布前构建检查。
 
 ---
 
-## 16. Definition of Done
+## 17. Definition of Done
 
 任务只有同时满足以下条件才算完成：
 
 - 行为符合当前版本需求和技术设计。
-- V1 与 V2 模块边界没有被破坏。
+- V1、V2 与 V3 模块边界没有被破坏。
 - macOS 和 iOS 共享逻辑未被无理由分叉。
 - 安全硬规则未被破坏。
 - 错误、取消、超时和资源释放得到处理。
-- 只有明确受管的进程可被停止。
-- Doctor 无网络副作用且不泄露 Secret。
+- 只有明确受管的进程可被停止（V2 Pi Hub 与 V3 npm 安装子进程）。
+- Doctor 无网络副作用且不泄露 Secret；V3 安装/更新日志同样不泄露 Secret。
 - 新行为有对应测试。
 - 相关文档已更新。
 - 所执行和未执行的检查均被如实记录。

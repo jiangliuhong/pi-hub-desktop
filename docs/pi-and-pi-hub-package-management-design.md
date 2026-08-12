@@ -1,9 +1,9 @@
 # Pi Hub Client：Pi 与 Pi Hub 检测、安装和更新设计
 
-> 文档状态：Draft  
+> 文档状态：Baseline（治理已对齐，Phase 0 完成）  
 > 目标平台：macOS 14+  
-> 关联版本：V2 Local Runtime 的后续增量（下文简称 V3 Package Management）  
-> 最后更新：2026-08-12
+> 关联版本：V3 Package Management（见 `docs/requirements-v3.md`）  
+> 最后更新：2026-08-11
 
 ## 1. 文档目的
 
@@ -18,7 +18,7 @@
 - 安装、更新失败后的清理、恢复和可诊断错误；
 - 与现有 Local Runtime 启停、Doctor、外部进程识别和 iOS 平台门控集成。
 
-本文档是设计文档，不直接改变当前 V2 行为。当前 `AGENTS.md`、`requirements-v2.md` 和 `design-v2.md` 明确把自动安装与升级排除在 V2 之外。进入实现阶段前，必须先将本能力登记为新的版本范围并同步修订这些约束；不得在规则仍冲突时直接提交功能代码。
+本文档是 V3 Package Management 的技术设计。Phase 0（治理对齐）已完成：已把本能力登记为 V3（`docs/requirements-v3.md`、`README.md`、`AGENTS.md` §1/§9），并同步修订了 `AGENTS.md` §2.3 与 `requirements-v2.md` §5.2 中“不自动安装/升级”的范围冲突。进入功能代码实现前仍需关闭 §22 Phase 0 / §24 中两项跨仓库确认（两个发布包是否支持 `--ignore-scripts`、版本命令稳定 schema）；这些确认需在 `jiangliuhong/pi-hub` 与 `@earendil-works/pi-coding-agent` 仓库完成并记录结论，不得在 Desktop 侧用临时猜测逻辑绕过。
 
 ## 2. 背景与当前问题
 
@@ -825,11 +825,13 @@ iOS build、Direct URL、SSH Forward、Host Key、Viewer、Keychain；不显示�
 
 ### Phase 0：范围与契约
 
-- 登记 V3；
-- 修订 `AGENTS.md` 中安装/升级的版本范围；
-- 更新 requirements；
-- 确认两个发布包支持 `--ignore-scripts`；
-- 确认版本命令稳定 schema。
+- [x] 登记 V3（`README.md`、`AGENTS.md` §1）；
+- [x] 修订 `AGENTS.md` 中安装/升级的版本范围（`AGENTS.md` §2.3、§9；新增 §5.6、§6.6 V3 子句）；
+- [x] 更新 requirements（新增 `docs/requirements-v3.md`；修订 `requirements-v2.md` §5.2）；
+- [ ] 确认两个发布包支持 `--ignore-scripts`（依赖 `jiangliuhong/pi-hub` 与 `@earendil-works/pi-coding-agent` 仓库）；
+- [ ] 确认版本命令稳定 schema（同上）。
+
+> 治理部分已完成；两项跨仓库确认是 Phase 1 功能代码的硬门控，未关闭前不得提交依赖它们的安装/后置验证代码。
 
 ### Phase 1：只读状态
 

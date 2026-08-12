@@ -9,7 +9,8 @@
 - 自动建立 SSH Local Port Forward；
 - 在 App 内受控 WebView 中使用现有 Pi Hub WebUI；
 - 在 macOS 检测和管理本机 Pi Hub；
-- 检查本机 Pi Hub 与 Pi 的基础运行环境。
+- 检查本机 Pi Hub 与 Pi 的基础运行环境；
+- 在 macOS 受管安装/更新本机 Pi 与 Pi Hub（V3）。
 
 ## 版本范围
 
@@ -43,6 +44,20 @@ V2 中独立的全局 `pi` CLI 是可选检查项，不是 Pi Hub 启动的硬�
 
 iOS 继续保留 V1 客户端能力，不实现本机进程管理。
 
+### V3：本机 Pi / Pi Hub 组件管理
+
+V3 在 V2 之上增量，只面向 macOS：
+
+- 分别检测 Pi 与 Pi Hub 的安装、来源、版本与更新状态；
+- 联网检查 stable 最新版本（缓存、离线降级、不降级）；
+- 在 Desktop 受管目录内安装或更新 Pi / Pi Hub，不修改用户外部环境，不请求 `sudo`；
+- 安装/更新使用固定包名、固定参数、原子激活、失败回滚与有限脱敏日志；
+- 与 V2 Local Runtime 启停、Doctor、外部进程识别集成。
+
+Node.js 自动安装/升级、beta 通道、后台静默更新、覆盖外部全局安装、写入系统目录均为 V3 非目标。iOS 不提供本机组件管理。
+
+iOS 继续保留 V1 / V2 客户端能力，不实现本机组件包管理。
+
 ## 文档
 
 ### 项目规则
@@ -59,6 +74,11 @@ iOS 继续保留 V1 客户端能力，不实现本机进程管理。
 - [V2 开发需求](./docs/requirements-v2.md)
 - [V2 技术设计](./docs/design-v2.md)
 
+### V3
+
+- [V3 开发需求](./docs/requirements-v3.md)
+- [V3 技术设计：Pi 与 Pi Hub 包管理](./docs/pi-and-pi-hub-package-management-design.md)
+
 ## 架构
 
 ```text
@@ -74,6 +94,14 @@ Pi Hub Client
     ├── LocalServiceProbe
     ├── ProcessSupervisor
     └── LocalRuntimeSettingsStore
+
+└── Package Management Domain (macOS V3)
+    ├── InstallationDetector (复用/扩展 V2)
+    ├── ReleaseClient
+    ├── NpmToolchainDetector
+    ├── PackageInstaller
+    ├── PostInstallVerifier
+    └── ManagedPackageStore ──activate──→ Local Runtime Domain
 
 Service WebView ───────────────────────→ Existing Pi Hub WebUI
 ```

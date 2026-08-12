@@ -150,10 +150,12 @@ iOS：
 
 ### 5.2 本版本不实现
 
-- 自动安装或升级 Node.js；
-- 自动执行 `npm install -g`；
-- 自动安装、升级或卸载 Pi；
-- 自动安装、升级或卸载 Pi Hub；
+> 注：V2 仍不实现 Pi / Pi Hub 的自动安装/升级；该能力已在 V3 纳入范围（见 `docs/requirements-v3.md`）。以下“自动安装/升级 Node.js”“任意 Shell 命令配置”“强制停止外部 Pi Hub”等在 V2 与 V3 均不实现。
+
+- 自动安装或升级 Node.js（V2 / V3 均不实现）；
+- 原地执行 `npm install -g` 修改用户外部全局安装（V2 不实现；V3 受管安装使用独立 staging，不原地修改外部安装）；
+- 自动安装、升级或卸载 Pi（V2 不实现；V3 受管安装/更新见 `docs/requirements-v3.md`）；
+- 自动安装、升级或卸载 Pi Hub（V2 不实现；V3 受管安装/更新见 `docs/requirements-v3.md`）；
 - 任意 Shell 命令配置；
 - 强制停止外部启动的 Pi Hub；
 - macOS 登录项或 LaunchAgent；
@@ -161,7 +163,7 @@ iOS：
 - Relay Server、Reverse Tunnel 或家庭电脑中继 Agent；
 - Terminal、PTY、SFTP；
 - Mac App Store 沙盒适配；
-- iOS 本机 Runtime 管理。
+- iOS 本机 Runtime / 本机组件管理。
 
 ---
 
