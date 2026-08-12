@@ -237,7 +237,22 @@ git push origin v0.1.0
 - `aarch64`：Apple Silicon（M1/M2/M3/M4）
 - `x86_64`：Intel Mac
 
-workflow 位于 `.github/workflows/release-macos.yml`。当前默认构建未签名包；如需让 Finder 直接信任应用，还需要在 GitHub Secrets 配置 Apple Developer 签名和公证凭据。
+### 打开临时未签名版本
+
+`v0.1.3` 是临时未签名版本。从浏览器下载后，macOS Gatekeeper 可能提示“Pi Hub Client 已损坏，无法打开”。仅当 DMG 来自本仓库的 [GitHub Releases](https://github.com/jiangliuhong/pi-hub-desktop/releases) 时，才使用以下方法：
+
+1. 将 `Pi Hub Client.app` 从 DMG 拖入“应用程序”目录。
+2. 打开“终端”，依次执行：
+
+```bash
+sudo codesign --force --deep --sign - "/Applications/Pi Hub Client.app"
+sudo xattr -dr com.apple.quarantine "/Applications/Pi Hub Client.app"
+open "/Applications/Pi Hub Client.app"
+```
+
+第一条命令为本机安装的 App Bundle 添加 ad-hoc 签名；第二条命令只移除该应用的下载隔离标记，不会全局关闭 Gatekeeper。如果应用安装在其他目录，请相应替换命令中的完整路径。不要对来源不明的应用执行这些命令。
+
+该方法仅用于临时未签名构建，不替代正式的 Developer ID 签名和 Apple 公证。workflow 位于 `.github/workflows/release-macos.yml`；后续正式版本仍需要在 GitHub Secrets 中配置有效的 Apple Developer 签名与公证凭据，才能让用户正常通过 Finder 打开应用。
 
 平台构建和真机验收必须在具备 macOS、Xcode、签名与设备环境的机器上执行。缺少环境时必须如实记录，不能声称已验证。
 
