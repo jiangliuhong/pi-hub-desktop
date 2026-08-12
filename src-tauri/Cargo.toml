@@ -1,6 +1,6 @@
 [package]
 name = "pi-hub-desktop"
-version = "0.1.1"
+version = "0.1.2"
 description = "Pi Hub Client — macOS / iOS client for Pi Hub"
 authors = ["jiangliuhong"]
 edition = "2021"

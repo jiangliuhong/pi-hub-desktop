@@ -66,14 +66,14 @@ jobs:
         uses: tauri-apps/tauri-action@v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # These are optional. Set them in the repository secrets to enable
-          # Apple signing and notarization without changing this workflow.
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # v0.1.2 is intentionally unsigned while the Apple certificate is
+          # repaired. Later releases continue to require signing/notarization.
+          APPLE_CERTIFICATE: ${{ github.ref_name != 'v0.1.2' && secrets.APPLE_CERTIFICATE || '' }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ github.ref_name != 'v0.1.2' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+          APPLE_SIGNING_IDENTITY: ${{ github.ref_name != 'v0.1.2' && secrets.APPLE_SIGNING_IDENTITY || '' }}
+          APPLE_ID: ${{ github.ref_name != 'v0.1.2' && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ github.ref_name != 'v0.1.2' && secrets.APPLE_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ github.ref_name != 'v0.1.2' && secrets.APPLE_TEAM_ID || '' }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: Pi Hub Client ${{ github.ref_name }}
